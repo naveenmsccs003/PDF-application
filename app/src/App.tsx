@@ -11,6 +11,8 @@ import type {
   Point,
   ProjectDto,
   ProjectMemberDto,
+  RfiDto,
+  RfiStatus,
   ScaleDto,
   TakeoffItemDto,
   UserDto,
@@ -335,6 +337,8 @@ function DocumentsPanel({
           {selectedPage && <PagePanel page={selectedPage} user={user} runAction={runAction} />}
 
           <TakeoffPanel document={selectedDocument} runAction={runAction} />
+
+          <RfiPanel document={selectedDocument} pages={pages} user={user} runAction={runAction} />
         </div>
       )}
     </section>
@@ -1281,6 +1285,144 @@ function TakeoffPanel({
       </ul>
       <button onClick={exportCsv}>Export CSV</button>
       {csv && <pre className="csv-preview">{csv}</pre>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RFI (RFI-01/02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+const RFI_STATUSES: RfiStatus[] = ["Open", "Answered", "Closed"];
+
+function RfiPanel({
+  document: doc,
+  pages,
+  user,
+  runAction,
+}: {
+  document: DocumentDto;
+  pages: PageDto[];
+  user: UserDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [rfis, setRfis] = useState<RfiDto[]>([]);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [tiePageId, setTiePageId] = useState("");
+  const [tieMarkupId, setTieMarkupId] = useState("");
+  const [markupsForTiePage, setMarkupsForTiePage] = useState<MarkupDto[]>([]);
+  const [statusDraft, setStatusDraft] = useState<Record<string, RfiStatus>>({});
+  const [responseDraft, setResponseDraft] = useState<Record<string, string>>({});
+
+  const reload = () => runAction(async () => setRfis(await api.listRfisForDocument(doc.id)));
+
+  useEffect(() => {
+    reload();
+    setTitle("");
+    setDescription("");
+    setTiePageId("");
+    setTieMarkupId("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  useEffect(() => {
+    setTieMarkupId("");
+    if (!tiePageId) {
+      setMarkupsForTiePage([]);
+      return;
+    }
+    runAction(async () => setMarkupsForTiePage(await api.listMarkupsByPage(tiePageId)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tiePageId]);
+
+  const createRfi = () =>
+    runAction(async () => {
+      await api.createRfi(doc.id, tiePageId || null, tieMarkupId || null, title, description || null, user.id);
+      setTitle("");
+      setDescription("");
+      setTiePageId("");
+      setTieMarkupId("");
+      await reload();
+    });
+
+  const updateStatus = (r: RfiDto) =>
+    runAction(async () => {
+      const status = statusDraft[r.id] ?? r.status;
+      const response = responseDraft[r.id] ?? r.response ?? "";
+      await api.setRfiStatus(r.id, status, response || null);
+      await reload();
+    });
+
+  const pageNumberFor = (pageId: string | null) => pages.find((p) => p.id === pageId)?.page_number ?? null;
+
+  return (
+    <div className="nested">
+      <h3>RFI (RFI-01/02)</h3>
+      <div className="row">
+        <input placeholder="RFI title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <select value={tiePageId} onChange={(e) => setTiePageId(e.target.value)}>
+          <option value="">(not tied to a page)</option>
+          {pages.map((p) => (
+            <option key={p.id} value={p.id}>
+              page {p.page_number}
+            </option>
+          ))}
+        </select>
+        {tiePageId && (
+          <select value={tieMarkupId} onChange={(e) => setTieMarkupId(e.target.value)}>
+            <option value="">(not tied to a specific markup)</option>
+            {markupsForTiePage.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.markup_type} {m.id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="row">
+        <input
+          placeholder="description (optional)"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+        <button onClick={createRfi} disabled={!title}>
+          Create RFI
+        </button>
+      </div>
+      <ul>
+        {rfis.map((r) => {
+          const pageNumber = pageNumberFor(r.page_id);
+          return (
+            <li key={r.id}>
+              <div>
+                <strong>#{r.number}</strong> {r.title} <span className="tag">{r.status}</span>
+                {pageNumber != null && <span className="tag">page {pageNumber}</span>}
+                {r.markup_id && <span className="tag">markup {r.markup_id.slice(0, 8)}</span>}
+              </div>
+              {r.description && <div className="muted">{r.description}</div>}
+              <div className="row">
+                <select
+                  value={statusDraft[r.id] ?? r.status}
+                  onChange={(e) => setStatusDraft((prev) => ({ ...prev, [r.id]: e.target.value as RfiStatus }))}
+                >
+                  {RFI_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  placeholder="response"
+                  value={responseDraft[r.id] ?? r.response ?? ""}
+                  onChange={(e) => setResponseDraft((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                />
+                <button onClick={() => updateStatus(r)}>Update</button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

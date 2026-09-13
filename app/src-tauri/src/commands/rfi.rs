@@ -1,0 +1,55 @@
+//! RFI-01/02 IPC commands, backed by `crates/rfi`.
+
+use crate::dto::RfiDto;
+use crate::AppState;
+use rfi::RfiStatus;
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn create_rfi(
+    state: tauri::State<AppState>,
+    document_id: String,
+    page_id: Option<String>,
+    markup_id: Option<String>,
+    title: String,
+    description: Option<String>,
+    created_by: Option<String>,
+) -> Result<RfiDto, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    rfi::create(
+        &conn,
+        &document_id,
+        page_id.as_deref(),
+        markup_id.as_deref(),
+        &title,
+        description.as_deref(),
+        created_by.as_deref(),
+    )
+    .map(Into::into)
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_rfi(state: tauri::State<AppState>, id: String) -> Result<RfiDto, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    rfi::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_rfis_for_document(state: tauri::State<AppState>, document_id: String) -> Result<Vec<RfiDto>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    rfi::list_by_document(&conn, &document_id)
+        .map(|rfis| rfis.into_iter().map(Into::into).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_rfi_status(
+    state: tauri::State<AppState>,
+    id: String,
+    status: RfiStatus,
+    response: Option<String>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    rfi::set_status(&conn, &id, status, response.as_deref()).map_err(|e| e.to_string())
+}

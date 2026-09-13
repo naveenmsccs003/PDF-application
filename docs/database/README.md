@@ -63,6 +63,23 @@ expansion — flagged here per Section 26/36.
   `member`) — no formal RBAC designed yet; kept minimal until the
   collaboration model (async vs. real-time) is confirmed.
 
+## Added 2026-09-13 — Rfi (RFI-01/02)
+
+| Table | Fields |
+|---|---|
+| Rfi | id, document_id, page_id, markup_id, number, title, description, status, response, created_by, created_at, updated_at |
+
+- `page_id`/`markup_id` are both nullable and independent —
+  `ON DELETE SET NULL` on both, so deleting the page/markup an RFI pointed
+  at doesn't cascade-delete the RFI (the question/answer trail outlives the
+  drawing element it was raised against).
+- `number` is sequential per `document_id` (`UNIQUE (document_id, number)`),
+  assigned as `MAX(number) + 1` at insert time — so RFIs can be referred to
+  the way they are on a real job site ("RFI #14"), not by opaque id.
+- `status` is a plain text field (`open`/`answered`/`closed`, matching
+  RFI-02's three states from the master list) — no state machine enforced
+  at the DB layer; `response` holds the answer text once one exists.
+
 ## Implementation status
 
 Initial migration (`crates/mds_db/migrations/0001_initial.sql`) implements

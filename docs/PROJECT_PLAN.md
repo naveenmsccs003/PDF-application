@@ -308,6 +308,43 @@ Phase 0 starts until the table above is clear.
       Rust changes. **NOT verified**: same live-IPC gap as everything
       else — clicking Close and confirming the picker resets through a
       signed-in `npm run tauri dev` session is still Naveen's check to run.
+  - **RFI-01/02 (2026-09-13)**: first feature area past the core
+    Document/Viewing/Markup/Measurement set — a new domain crate
+    (`crates/rfi`) following the same Domain-on-`mds_db` shape as `markup`/
+    `measurement`. Added the `rfi` table directly to
+    `crates/mds_db/migrations/0001_initial.sql` (this project has no
+    deployed instances yet, so — matching how `user`/`project`/
+    `project_member` were added earlier — there's no migration history to
+    preserve by appending a `0002_*.sql` instead). `page_id`/`markup_id` are
+    both nullable and independent, `ON DELETE SET NULL`, so an RFI survives
+    the page/markup it was filed against being deleted — the Q&A trail has
+    value on its own. `number` is assigned sequentially per document
+    (`MAX(number)+1`) so RFIs read the way they do on a real job site
+    ("RFI #14"). Deliberately did NOT build a full comment-thread model
+    like `MarkupComment` — the master list only asked for
+    open/answered/closed status tracking, so `status` + a single `response`
+    field covers RFI-02 without inventing an unrequested thread feature;
+    `set_status` doesn't enforce a state machine (closed → reopened is a
+    real workflow on job sites, not a bug to prevent). Frontend: a new
+    `RfiPanel`, document-scoped like `TakeoffPanel`, with a create form
+    (title, optional page-tie dropdown, and a markup-tie dropdown that
+    populates once a page is picked) and a per-row status/response editor.
+    Registry blocker note ("Collaboration model not confirmed") turned out
+    not to actually block this — RFI-01/02 only need the async
+    project-membership model that already exists (`project`/
+    `project_member`, used by DOC-06/MARK-07 already), not the unresolved
+    real-time-vs-async question.
+    - Verified: `cargo test -p rfi` — 5/5 passing (create/get/list round
+      trip, per-document sequential numbering, status+response update,
+      not-found error, page deletion nulls `page_id` without deleting the
+      RFI). `cargo check -p rfi -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 85/85 passing, no
+      regressions. `npm run build` — clean, no type errors. **NOT
+      verified**: same live-IPC gap as every feature so far — actually
+      filing an RFI and walking it through open → answered → closed
+      through a signed-in `npm run tauri dev` session is still Naveen's
+      check to run. Also not built: RFI-03 (drawing revision tracking,
+      overlaps `DocumentVersion`) and RFI-04 (comparison/overlay, BACKLOG).
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

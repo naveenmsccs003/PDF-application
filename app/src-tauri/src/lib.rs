@@ -109,6 +109,10 @@ pub fn run() {
             commands::takeoff::update_takeoff_item,
             commands::takeoff::delete_takeoff_item,
             commands::takeoff::export_takeoff_csv,
+            commands::rfi::create_rfi,
+            commands::rfi::get_rfi,
+            commands::rfi::list_rfis_for_document,
+            commands::rfi::set_rfi_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -61,6 +61,7 @@ mod tests {
             "measurement",
             "takeoff_item",
             "recovery_state",
+            "rfi",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),

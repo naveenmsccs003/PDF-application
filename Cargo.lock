@@ -95,6 +95,7 @@ dependencies = [
  "measurement",
  "pdf_core",
  "project",
+ "rfi",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3750,6 +3751,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "rfi"
+version = "0.1.0"
+dependencies = [
+ "mds_db",
+ "rusqlite",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

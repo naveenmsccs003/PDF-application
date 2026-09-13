@@ -118,6 +118,21 @@ export interface TakeoffItemDto {
   total_cost: number | null;
 }
 
+export type RfiStatus = "Open" | "Answered" | "Closed";
+
+export interface RfiDto {
+  id: string;
+  document_id: string;
+  page_id: string | null;
+  markup_id: string | null;
+  number: number;
+  title: string;
+  description: string | null;
+  status: RfiStatus;
+  response: string | null;
+  created_by: string | null;
+}
+
 // -- project --
 
 export const createUser = (email: string, displayName: string) =>
@@ -273,3 +288,19 @@ export const updateTakeoffItem = (
 export const deleteTakeoffItem = (id: string) => invoke<void>("delete_takeoff_item", { id });
 
 export const exportTakeoffCsv = (documentId: string) => invoke<string>("export_takeoff_csv", { documentId });
+
+// -- rfi --
+
+export const createRfi = (
+  documentId: string,
+  pageId: string | null,
+  markupId: string | null,
+  title: string,
+  description: string | null,
+  createdBy: string | null,
+) => invoke<RfiDto>("create_rfi", { documentId, pageId, markupId, title, description, createdBy });
+
+export const listRfisForDocument = (documentId: string) => invoke<RfiDto[]>("list_rfis_for_document", { documentId });
+
+export const setRfiStatus = (id: string, status: RfiStatus, response: string | null) =>
+  invoke<void>("set_rfi_status", { id, status, response });
