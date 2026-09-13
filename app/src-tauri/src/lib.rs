@@ -74,6 +74,8 @@ pub fn run() {
             commands::pdf::import_pdf_document,
             commands::pdf::render_page_thumbnail,
             commands::pdf::export_flattened_pdf,
+            commands::pdf::set_document_pdf_password,
+            commands::pdf::clear_document_pdf_password,
             commands::export::export_handoff_package,
             commands::project::create_user,
             commands::project::get_user_by_email,

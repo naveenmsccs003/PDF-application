@@ -234,6 +234,8 @@ function DocumentsPanel({
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [importTitle, setImportTitle] = useState("");
+  const [importPassword, setImportPassword] = useState("");
+  const [documentPasswordDraft, setDocumentPasswordDraft] = useState("");
 
   const reloadDocuments = () =>
     runAction(async () => setDocuments(await api.listDocumentsForProject(project.id)));
@@ -274,10 +276,23 @@ function DocumentsPanel({
       if (!path || typeof path !== "string") return;
       const filename = path.split("/").pop() ?? path;
       const title = importTitle || filename;
-      const doc = await api.importPdfDocument(path, title, project.id);
+      const doc = await api.importPdfDocument(path, title, project.id, importPassword || null);
       await reloadDocuments();
       setSelectedDocumentId(doc.id);
       setImportTitle("");
+      setImportPassword("");
+    });
+
+  const setDocumentPassword = (doc: DocumentDto) =>
+    runAction(async () => {
+      if (!documentPasswordDraft) return;
+      await api.setDocumentPdfPassword(doc.id, documentPasswordDraft);
+      setDocumentPasswordDraft("");
+    });
+
+  const clearDocumentPassword = (doc: DocumentDto) =>
+    runAction(async () => {
+      await api.clearDocumentPdfPassword(doc.id);
     });
 
   const rotatePage = (page: PageDto) =>
@@ -326,8 +341,30 @@ function DocumentsPanel({
         {selectedDocument && <button onClick={exportFlattenedPdf}>Export flattened PDF…</button>}
         {selectedDocument && <button onClick={exportHandoffPackage}>Export handoff package…</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
+        <input
+          type="password"
+          placeholder="PDF password (if encrypted)"
+          value={importPassword}
+          onChange={(e) => setImportPassword(e.target.value)}
+        />
         <button onClick={importPdf}>Import PDF…</button>
       </div>
+
+      {selectedDocument && (
+        <div className="row">
+          <span className="muted">PDF password (SEC-01/02, stored in the OS keychain):</span>
+          <input
+            type="password"
+            placeholder="set/update password"
+            value={documentPasswordDraft}
+            onChange={(e) => setDocumentPasswordDraft(e.target.value)}
+          />
+          <button onClick={() => setDocumentPassword(selectedDocument)} disabled={!documentPasswordDraft}>
+            Save
+          </button>
+          <button onClick={() => clearDocumentPassword(selectedDocument)}>Clear stored password</button>
+        </div>
+      )}
 
       {selectedDocument && (
         <div className="nested">

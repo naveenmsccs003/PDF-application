@@ -29,6 +29,14 @@ pub enum PdfCoreError {
         zoomed_width: u32,
         zoomed_height: u32,
     },
+    /// SEC-01: this PDF is encrypted and either no password was supplied
+    /// or the one supplied was wrong. Deliberately its own variant (mapped
+    /// from Pdfium's own `FPDF_ERR_PASSWORD`, not left folded into the
+    /// generic `Pdfium(PdfiumError)` case) so a caller can distinguish "ask
+    /// the user for a password and retry" from every other failure mode,
+    /// which needs a different UI response entirely.
+    #[error("this PDF is password-protected and no password (or the wrong one) was supplied")]
+    PasswordRequired,
 }
 
 /// A PDF engine capable of opening documents. `Document<'e>` borrows from
@@ -41,7 +49,11 @@ pub trait PdfEngine {
     where
         Self: 'e;
 
-    fn open<'e>(&'e self, path: &Path) -> Result<Self::Document<'e>, PdfCoreError>;
+    /// SEC-01: `password` is `None` for the overwhelming majority of PDFs
+    /// (unencrypted); an encrypted one without a correct password errors
+    /// with `PdfCoreError::PasswordRequired` rather than any other error
+    /// variant, so callers can prompt and retry specifically for that case.
+    fn open<'e>(&'e self, path: &Path, password: Option<&'e str>) -> Result<Self::Document<'e>, PdfCoreError>;
 }
 
 /// One drawable annotation to burn into a page for EXPORT-01. Deliberately
@@ -253,9 +265,16 @@ impl PdfiumEngine {
 impl PdfEngine for PdfiumEngine {
     type Document<'e> = PdfiumDocument<'e>;
 
-    fn open<'e>(&'e self, path: &Path) -> Result<Self::Document<'e>, PdfCoreError> {
-        let document = self.pdfium.load_pdf_from_file(path, None)?;
-        Ok(PdfiumDocument { document })
+    fn open<'e>(&'e self, path: &Path, password: Option<&'e str>) -> Result<Self::Document<'e>, PdfCoreError> {
+        use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
+
+        match self.pdfium.load_pdf_from_file(path, password) {
+            Ok(document) => Ok(PdfiumDocument { document }),
+            Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {
+                Err(PdfCoreError::PasswordRequired)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -430,7 +449,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         assert_eq!(document.page_count(), 7);
         let (width, height) = document.page_size(0).unwrap();
@@ -442,6 +461,36 @@ mod tests {
 
         let png_bytes = document.render_page_to_png(0, 800).unwrap();
         assert!(png_bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    /// SEC-01. Fixture committed at `tests/fixtures/encrypted.pdf` (a
+    /// single blank page, user+owner password `secret123`, generated with
+    /// `pypdf`) rather than gated on a machine-specific
+    /// `sample_pdf_path()` — unlike the rest of this module's real-engine
+    /// tests, this one doesn't depend on anything outside the repo besides
+    /// `libpdfium.so` itself.
+    #[test]
+    fn opening_an_encrypted_pdf_requires_the_correct_password() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let encrypted_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted.pdf");
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+
+        assert!(matches!(engine.open(&encrypted_path, None), Err(PdfCoreError::PasswordRequired)));
+        assert!(matches!(
+            engine.open(&encrypted_path, Some("wrong-password")),
+            Err(PdfCoreError::PasswordRequired)
+        ));
+
+        let document = engine
+            .open(&encrypted_path, Some("secret123"))
+            .expect("the correct password should open the document");
+        assert_eq!(document.page_count(), 1);
     }
 
     #[test]
@@ -467,7 +516,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         // Page is 612x792 pt (US Letter); zoom to 900px wide so height > 900
         // too, guaranteeing a multi-tile grid at tile_size 256.
@@ -513,7 +562,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         let full = document.render_page_to_png(0, 800).unwrap();
         let full_image = image::load_from_memory(&full).unwrap();
@@ -540,7 +589,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let mut document = engine.open(&pdf_path).expect("document should open");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
 
         let before = document.render_page_to_png(0, 400).unwrap();
 
@@ -583,7 +632,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let mut document = engine.open(&pdf_path).expect("document should open");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
 
         let err = document
             .flatten_page_with_annotations(9999, &[])
@@ -605,7 +654,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let mut document = engine.open(&pdf_path).expect("document should open");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
         let original_page_count = document.page_count();
 
         document
@@ -626,7 +675,7 @@ mod tests {
         ));
         document.save(&out_path).expect("save should succeed");
 
-        let reopened = engine.open(&out_path).expect("flattened export should reopen");
+        let reopened = engine.open(&out_path, None).expect("flattened export should reopen");
         assert_eq!(reopened.page_count(), original_page_count);
 
         let _ = std::fs::remove_file(&out_path);
@@ -732,7 +781,7 @@ mod tests {
 
         let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         assert!(matches!(
             document.page_size(9999),

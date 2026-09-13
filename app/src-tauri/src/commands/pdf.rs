@@ -42,10 +42,15 @@ pub fn dev_pdfium_lib_path() -> PathBuf {
 pub enum PdfEngineRequest {
     GetPageSizes {
         path: String,
+        /// SEC-01: `None` for the overwhelming majority of PDFs — only
+        /// set when the caller already knows (or is guessing) this PDF is
+        /// encrypted.
+        password: Option<String>,
         reply: mpsc::Sender<Result<Vec<(f32, f32)>, String>>,
     },
     RenderThumbnail {
         path: String,
+        password: Option<String>,
         page_index: usize,
         width: u32,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
@@ -57,6 +62,7 @@ pub enum PdfEngineRequest {
     /// on this thread, inside `export::export_flattened_pdf`) never does.
     ExportFlattened {
         path: String,
+        password: Option<String>,
         output_path: String,
         markups_by_page_index: std::collections::HashMap<usize, Vec<markup::Markup>>,
         reply: mpsc::Sender<Result<(), String>>,
@@ -93,25 +99,26 @@ pub fn spawn_pdf_engine_thread() -> Option<mpsc::Sender<PdfEngineRequest>> {
 
         for request in rx {
             match request {
-                PdfEngineRequest::GetPageSizes { path, reply } => {
+                PdfEngineRequest::GetPageSizes { path, password, reply } => {
                     let result = (|| -> Result<Vec<(f32, f32)>, String> {
-                        let document = engine.open(Path::new(&path)).map_err(|e| e.to_string())?;
+                        let document = engine.open(Path::new(&path), password.as_deref()).map_err(|e| e.to_string())?;
                         (0..document.page_count())
                             .map(|i| document.page_size(i).map_err(|e| e.to_string()))
                             .collect()
                     })();
                     let _ = reply.send(result);
                 }
-                PdfEngineRequest::RenderThumbnail { path, page_index, width, reply } => {
+                PdfEngineRequest::RenderThumbnail { path, password, page_index, width, reply } => {
                     let result = (|| -> Result<Vec<u8>, String> {
-                        let document = engine.open(Path::new(&path)).map_err(|e| e.to_string())?;
+                        let document = engine.open(Path::new(&path), password.as_deref()).map_err(|e| e.to_string())?;
                         document.render_thumbnail_png(page_index, width).map_err(|e| e.to_string())
                     })();
                     let _ = reply.send(result);
                 }
-                PdfEngineRequest::ExportFlattened { path, output_path, markups_by_page_index, reply } => {
+                PdfEngineRequest::ExportFlattened { path, password, output_path, markups_by_page_index, reply } => {
                     let result = (|| -> Result<(), String> {
-                        let mut document = engine.open(Path::new(&path)).map_err(|e| e.to_string())?;
+                        let mut document =
+                            engine.open(Path::new(&path), password.as_deref()).map_err(|e| e.to_string())?;
                         export::export_flattened_pdf(&mut document, &markups_by_page_index, Path::new(&output_path))
                             .map_err(|e| e.to_string())
                     })();
@@ -128,23 +135,34 @@ pub fn spawn_pdf_engine_thread() -> Option<mpsc::Sender<PdfEngineRequest>> {
     }
 }
 
-fn get_page_sizes(state: &AppState, path: &str) -> Result<Vec<(f32, f32)>, String> {
+fn get_page_sizes(state: &AppState, path: &str, password: Option<&str>) -> Result<Vec<(f32, f32)>, String> {
     let tx = state.pdf_engine.as_ref().ok_or("PDF engine unavailable (libpdfium.so not found)")?;
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.lock()
         .map_err(|e| e.to_string())?
-        .send(PdfEngineRequest::GetPageSizes { path: path.to_string(), reply: reply_tx })
+        .send(PdfEngineRequest::GetPageSizes {
+            path: path.to_string(),
+            password: password.map(str::to_string),
+            reply: reply_tx,
+        })
         .map_err(|_| "PDF engine thread is not running".to_string())?;
     reply_rx.recv().map_err(|_| "PDF engine thread dropped the reply channel".to_string())?
 }
 
-fn render_thumbnail(state: &AppState, path: &str, page_index: usize, width: u32) -> Result<Vec<u8>, String> {
+fn render_thumbnail(
+    state: &AppState,
+    path: &str,
+    password: Option<&str>,
+    page_index: usize,
+    width: u32,
+) -> Result<Vec<u8>, String> {
     let tx = state.pdf_engine.as_ref().ok_or("PDF engine unavailable (libpdfium.so not found)")?;
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.lock()
         .map_err(|e| e.to_string())?
         .send(PdfEngineRequest::RenderThumbnail {
             path: path.to_string(),
+            password: password.map(str::to_string),
             page_index,
             width,
             reply: reply_tx,
@@ -156,6 +174,7 @@ fn render_thumbnail(state: &AppState, path: &str, page_index: usize, width: u32)
 fn export_flattened(
     state: &AppState,
     path: &str,
+    password: Option<&str>,
     output_path: &str,
     markups_by_page_index: std::collections::HashMap<usize, Vec<markup::Markup>>,
 ) -> Result<(), String> {
@@ -165,6 +184,7 @@ fn export_flattened(
         .map_err(|e| e.to_string())?
         .send(PdfEngineRequest::ExportFlattened {
             path: path.to_string(),
+            password: password.map(str::to_string),
             output_path: output_path.to_string(),
             markups_by_page_index,
             reply: reply_tx,
@@ -207,20 +227,43 @@ impl PdfDocument for PageSizesDocument {
     }
 }
 
+/// SEC-01: `password` is only needed for an encrypted PDF (see
+/// `pdf_core::PdfCoreError::PasswordRequired` — the frontend recognizes
+/// that specific error and prompts for a password, then retries this same
+/// command with one). SEC-02: on success, a supplied password is stored
+/// via `secrets::store_pdf_password` keyed by the new document's id, so
+/// `render_page_thumbnail`/exports don't need it passed in again every
+/// call — see `commands::recovery`'s module doc for why that matters
+/// (autosave runs on a timer, not on explicit user action, so there's no
+/// natural place to re-prompt for a password there). A failure to store
+/// the password is logged, not propagated — the import itself already
+/// succeeded, and failing the whole operation over a credential-store
+/// hiccup would be a worse outcome than just re-prompting next time.
 #[tauri::command]
 pub fn import_pdf_document(
     state: tauri::State<AppState>,
     path: String,
     title: String,
     project_id: Option<String>,
+    password: Option<String>,
 ) -> Result<DocumentDto, String> {
-    let sizes = get_page_sizes(&state, &path)?;
+    let sizes = get_page_sizes(&state, &path, password.as_deref())?;
     let fake_document = PageSizesDocument { sizes };
 
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-    document::import_document(&mut conn, &fake_document, &path, &title, project_id.as_deref())
-        .map(Into::into)
-        .map_err(|e| e.to_string())
+    let document = {
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        document::import_document(&mut conn, &fake_document, &path, &title, project_id.as_deref())
+            .map(DocumentDto::from)
+            .map_err(|e| e.to_string())?
+    };
+
+    if let Some(password) = password.as_deref() {
+        if let Err(e) = secrets::store_pdf_password(&document.id, password) {
+            eprintln!("failed to store PDF password for document {}: {e}", document.id);
+        }
+    }
+
+    Ok(document)
 }
 
 /// Renders one page as a small thumbnail, returned as a `data:` URI so the
@@ -237,10 +280,26 @@ pub fn render_page_thumbnail(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         document::get_document(&conn, &document_id).map_err(|e| e.to_string())?.file_path
     };
+    let password = secrets::get_pdf_password(&document_id).map_err(|e| e.to_string())?;
     let page_index = (page_number - 1).max(0) as usize;
-    let png_bytes = render_thumbnail(&state, &file_path, page_index, width)?;
+    let png_bytes = render_thumbnail(&state, &file_path, password.as_deref(), page_index, width)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     Ok(format!("data:image/png;base64,{encoded}"))
+}
+
+/// SEC-01/02: associates `password` with `document_id` for future
+/// renders/exports (via the OS keychain, see `crates/secrets`) without
+/// re-importing. Useful if the password wasn't known/entered at import
+/// time, or needs to be corrected.
+#[tauri::command]
+pub fn set_document_pdf_password(document_id: String, password: String) -> Result<(), String> {
+    secrets::store_pdf_password(&document_id, &password).map_err(|e| e.to_string())
+}
+
+/// SEC-02: forgets any password stored for `document_id`.
+#[tauri::command]
+pub fn clear_document_pdf_password(document_id: String) -> Result<(), String> {
+    secrets::delete_pdf_password(&document_id).map_err(|e| e.to_string())
 }
 
 /// Does the actual work behind `export_flattened_pdf` below — pulled out
@@ -269,7 +328,8 @@ pub(crate) fn export_document_flattened_pdf(
         }
     }
 
-    export_flattened(state, &file_path, output_path, markups_by_page_index)
+    let password = secrets::get_pdf_password(document_id).map_err(|e| e.to_string())?;
+    export_flattened(state, &file_path, password.as_deref(), output_path, markups_by_page_index)
 }
 
 /// EXPORT-01: burns every page's non-hidden markups into a flattened copy

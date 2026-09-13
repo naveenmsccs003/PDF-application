@@ -157,8 +157,16 @@ export const removeProjectMember = (projectId: string, userId: string) =>
 
 // -- document / pdf --
 
-export const importPdfDocument = (path: string, title: string, projectId: string | null) =>
-  invoke<DocumentDto>("import_pdf_document", { path, title, projectId });
+export const importPdfDocument = (path: string, title: string, projectId: string | null, password: string | null) =>
+  invoke<DocumentDto>("import_pdf_document", { path, title, projectId, password });
+
+// -- security (SEC-01/02) --
+
+export const setDocumentPdfPassword = (documentId: string, password: string) =>
+  invoke<void>("set_document_pdf_password", { documentId, password });
+
+export const clearDocumentPdfPassword = (documentId: string) =>
+  invoke<void>("clear_document_pdf_password", { documentId });
 
 export const renderPageThumbnail = (documentId: string, pageNumber: number, width: number) =>
   invoke<string>("render_page_thumbnail", { documentId, pageNumber, width });

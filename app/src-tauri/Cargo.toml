@@ -35,6 +35,7 @@ takeoff = { path = "../../crates/takeoff" }
 rfi = { path = "../../crates/rfi" }
 export = { path = "../../crates/export" }
 recovery = { path = "../../crates/recovery" }
+secrets = { path = "../../crates/secrets" }
 tauri-plugin-dialog = "2"
 
 

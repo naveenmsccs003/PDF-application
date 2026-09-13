@@ -469,6 +469,75 @@ Phase 0 starts until the table above is clear.
       actually watching an autosave tick land, then restoring/discarding a
       real snapshot, through a signed-in `npm run tauri dev` session is
       still Naveen's check to run.
+  - **SEC-01/02 local password protection + secure credential handling
+    (2026-09-13)**: read "local password protection" as opening PDFs that
+    are themselves password-protected (not an app-wide login/lock screen —
+    nothing in the schema or master list suggested that, and `pdfium-render`
+    already had `load_pdf_from_file`'s password parameter sitting unused,
+    hardcoded to `None`, since `PdfiumEngine::open` was written before this
+    was needed). Added `PdfCoreError::PasswordRequired`, mapped from
+    Pdfium's own `FPDF_ERR_PASSWORD` via `PdfiumInternalError::
+    PasswordError`, as its own error variant rather than folding it into
+    the generic `Pdfium(PdfiumError)` case, so a caller can tell "ask the
+    user for a password and retry" apart from every other failure mode.
+    `PdfEngine::open` gained a `password: Option<&str>` parameter (tied to
+    the same lifetime as the engine reference itself — a pdfium-render
+    constraint, not a choice) threaded through `commands::pdf`'s
+    `PdfEngineRequest` variants and `import_pdf_document`.
+    - Verified against a real encrypted PDF, not just a mocked error path:
+      committed a tiny fixture (`crates/pdf_core/tests/fixtures/
+      encrypted.pdf`, one blank page, password `secret123`, generated with
+      `pypdf` since no PDF-encryption tool was already available in this
+      environment) and a new real-engine test confirms opening it with no
+      password or the wrong one both return `PasswordRequired`, and the
+      correct password opens it successfully.
+    - SEC-02 (secure credential handling) fell out of SEC-01 needing
+      somewhere to keep a password after the user types it once — without
+      it, every thumbnail render and every export of an encrypted document
+      would need the password re-supplied on every single IPC call, which
+      is unworkable once autosave (REL-01) is calling
+      `export_document_flattened_pdf` on a timer with no user present to
+      prompt. New `crates/secrets` crate wraps the `keyring` crate
+      (Secret Service/GNOME Keyring on Linux, Keychain on macOS,
+      Credential Manager on Windows) — a password lives in the OS
+      keychain, keyed by document id, never in `mds_rebar.sqlite` (which
+      would otherwise leak it into `RecoveryState` snapshots and any future
+      backup/sync of that file too).
+    - **Found and fixed a real bug while verifying this, not just an
+      environment quirk**: a bare `keyring = "3"` dependency compiled
+      clean and every call returned `Ok(())`/no error, but a fresh
+      `keyring::Entry` could never read back what a *different* fresh
+      `Entry` had just stored for the same service+key — confirmed with a
+      throwaway debug binary (`cargo run --example`, since deleted) that
+      isolated it to exactly that: same-`Entry` round trip worked, a
+      second independent `Entry::new()` got `NoEntry`. Root cause: keyring
+      3.x restructured to ship **no default backend at all** — a bare
+      `keyring = "3"` silently compiles against no real platform store.
+      Confirmed a real, working `org.freedesktop.secrets` D-Bus service
+      was reachable in this environment (`dbus-send` introspection) before
+      concluding it was a crate-configuration issue rather than an
+      environment one. Fixed with explicit per-OS backend features in
+      `crates/secrets/Cargo.toml` (`sync-secret-service` + `crypto-rust`
+      on Linux, `apple-native` on macOS, `windows-native` on Windows); the
+      real round trip was reverified working afterward with the same
+      debug binary before it was deleted. This means every prior "OS
+      keychain" mention anywhere in this doc set before today didn't
+      actually have a working implementation to point to — this is the
+      first one.
+    - Verified: `cargo test -p secrets` — 5/5 passing against the real,
+      running `gnome-keyring-daemon` in this environment (store/get round
+      trip, overwrite replaces the old value, delete then get returns
+      none, get/delete of a never-stored id are not errors). `cargo test
+      -p pdf_core` — 11/11 passing (10 prior + the new encrypted-PDF
+      test), still reproducibly serialized via the `Mutex` from the
+      EXPORT-01 pass. `cargo check -p secrets -p pdf_core -p app` — clean.
+      `npm run build` — clean, no type errors. **NOT verified**: same
+      live-IPC gap as every feature so far — actually importing a real
+      password-protected PDF and confirming a later thumbnail render
+      doesn't re-prompt, through a signed-in `npm run tauri dev` session,
+      is still Naveen's check to run. Also unverified: the macOS/Windows
+      keychain backends (no such machine available in this environment) —
+      only the Linux path has been exercised against a real OS keychain.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
