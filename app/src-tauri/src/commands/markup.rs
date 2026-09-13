@@ -1,14 +1,17 @@
-//! MARK-01–04/07/08 IPC commands, backed by `crates/markup`. MARK-06
-//! (undo/redo, `markup::UndoStack`) isn't wired here — an `UndoStack` is
-//! in-memory, per-editing-session state, and deciding its scope (per
-//! document? per page? per user, for the confirmed multi-user case?) is a
-//! real design question, not a mechanical wiring step like the rest of
-//! this file. MARK-05 (markup list/layer panel) is a pure frontend concern
-//! once `list_markups_by_page` below exists.
+//! MARK-01–04/07/08 IPC commands, backed by `crates/markup`, plus MARK-06
+//! (undo/redo). Scoping decision for `UndoStack`: one stack per page,
+//! keyed in `AppState::markup_undo`. Not per-document or app-wide, because
+//! the UI is already organized per page (`PdfCanvas`/`PagePanel` both take
+//! a single `PageDto`) and undoing an edit on the page you're not looking
+//! at would be confusing; not per-user either, since each user runs their
+//! own Tauri process — this in-memory state is already scoped to one user
+//! by virtue of being one process's memory, so there's no cross-user
+//! stack to separate. MARK-05 (markup list/layer panel) is a pure frontend
+//! concern once `list_markups_by_page` below exists.
 
-use crate::dto::{MarkupCommentDto, MarkupDto};
+use crate::dto::{MarkupCommentDto, MarkupDto, UndoStatusDto};
 use crate::AppState;
-use markup::{MarkupGeometry, MarkupStyle, MarkupType};
+use markup::{Command, Markup, MarkupGeometry, MarkupStyle, MarkupType};
 
 #[tauri::command]
 pub fn create_markup(
@@ -19,10 +22,25 @@ pub fn create_markup(
     style: MarkupStyle,
     author: Option<String>,
 ) -> Result<MarkupDto, String> {
+    geometry.validate(markup_type).map_err(|e| e.to_string())?;
+    let markup_row = Markup {
+        id: mds_db::new_uuid(),
+        page_id: page_id.clone(),
+        markup_type,
+        geometry,
+        style,
+        author,
+        locked: false,
+        hidden: false,
+    };
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::create(&conn, &page_id, markup_type, geometry, style, author.as_deref())
-        .map(Into::into)
-        .map_err(|e| e.to_string())
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(page_id)
+        .or_default()
+        .execute(&conn, Command::Create(markup_row.clone()))
+        .map_err(|e| e.to_string())?;
+    Ok(markup_row.into())
 }
 
 #[tauri::command]
@@ -46,32 +64,89 @@ pub fn update_markup_geometry(
     markup_type: MarkupType,
     geometry: MarkupGeometry,
 ) -> Result<(), String> {
+    geometry.validate(markup_type).map_err(|e| e.to_string())?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::update_geometry(&conn, &id, markup_type, &geometry).map_err(|e| e.to_string())
+    let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(before.page_id.clone())
+        .or_default()
+        .execute(
+            &conn,
+            Command::SetGeometry { id, markup_type, before: before.geometry, after: geometry },
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_markup_style(state: tauri::State<AppState>, id: String, style: MarkupStyle) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::update_style(&conn, &id, &style).map_err(|e| e.to_string())
+    let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(before.page_id.clone())
+        .or_default()
+        .execute(&conn, Command::SetStyle { id, before: before.style, after: style })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_markup_locked(state: tauri::State<AppState>, id: String, locked: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::set_locked(&conn, &id, locked).map_err(|e| e.to_string())
+    let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(before.page_id.clone())
+        .or_default()
+        .execute(&conn, Command::SetLocked { id, before: before.locked, after: locked })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_markup_hidden(state: tauri::State<AppState>, id: String, hidden: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::set_hidden(&conn, &id, hidden).map_err(|e| e.to_string())
+    let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(before.page_id.clone())
+        .or_default()
+        .execute(&conn, Command::SetHidden { id, before: before.hidden, after: hidden })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_markup(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    markup::delete(&conn, &id).map(|_| ()).map_err(|e| e.to_string())
+    let markup_row = markup::get(&conn, &id).map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks
+        .entry(markup_row.page_id.clone())
+        .or_default()
+        .execute(&conn, Command::Delete(markup_row))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn undo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks.entry(page_id).or_default().undo(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn redo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    stacks.entry(page_id).or_default().redo(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn markup_undo_status(state: tauri::State<AppState>, page_id: String) -> Result<UndoStatusDto, String> {
+    let stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
+    Ok(match stacks.get(&page_id) {
+        Some(stack) => UndoStatusDto { can_undo: stack.can_undo(), can_redo: stack.can_redo() },
+        None => UndoStatusDto { can_undo: false, can_redo: false },
+    })
 }
 
 #[tauri::command]

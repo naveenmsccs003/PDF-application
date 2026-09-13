@@ -2,6 +2,7 @@ mod commands;
 mod dto;
 
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -23,6 +24,10 @@ pub struct AppState {
     /// `render_page_thumbnail` return a clear error instead of the whole
     /// app failing to launch.
     pdf_engine: Option<Mutex<std::sync::mpsc::Sender<commands::pdf::PdfEngineRequest>>>,
+    /// MARK-06: one `UndoStack` per page, created on first use. See
+    /// `commands::markup`'s module doc for why this is scoped per page
+    /// rather than per document or per user.
+    markup_undo: Mutex<HashMap<String, markup::UndoStack>>,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -53,6 +58,7 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(conn),
                 pdf_engine,
+                markup_undo: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -82,6 +88,9 @@ pub fn run() {
             commands::markup::set_markup_locked,
             commands::markup::set_markup_hidden,
             commands::markup::delete_markup,
+            commands::markup::undo_markup,
+            commands::markup::redo_markup,
+            commands::markup::markup_undo_status,
             commands::markup::add_markup_comment,
             commands::markup::list_markup_comments,
             commands::markup::delete_markup_comment,

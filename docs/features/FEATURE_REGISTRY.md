@@ -24,8 +24,11 @@ and `takeoff` are now called from `app/src-tauri/src/commands/*.rs` (34
 (app/src-tauri); no frontend UI yet" mean exactly that: the Rust side is
 callable, but `app/src/App.tsx` is still the default Vite/React scaffold,
 so nothing actually calls these commands yet. DOC-01 (`import_document`)
-and MARK-06 (`UndoStack`) are still genuinely unwired for the reasons
-noted on their own rows.
+was genuinely unwired for the reasons noted on its own row until it got
+wired after all (see `docs/PROJECT_PLAN.md`); MARK-06 (`UndoStack`) is now
+IPC-wired too, scoped one stack per page — see its own row and
+`docs/PROJECT_PLAN.md`'s "MARK-06 undo/redo wired" entry for the scoping
+rationale.
 
 ## Registry
 
@@ -46,7 +49,7 @@ noted on their own rows.
 | MARK-03 | Markup | Select / move / resize / edit | MVP | IMPLEMENTED | | Markup | | `cargo test -p markup` (undo_move_restores_previous_geometry) | `crates/markup/src/lib.rs` | Move/resize/edit = geometry or style update; "select" is UI-only, not covered here | IPC wired (app/src-tauri); no frontend UI yet |
 | MARK-04 | Markup | Delete | MVP | IMPLEMENTED | | Markup | | `cargo test -p markup` (delete_removes_row_and_returns_snapshot) | `crates/markup/src/lib.rs` | | IPC wired (app/src-tauri); no frontend UI yet |
 | MARK-05 | Markup | Markup list / layer panel | MVP | NOT_STARTED | | Markup | | | | UI component, needs `app/src-tauri` unblocked | ADR-001 unresolved |
-| MARK-06 | Markup | Undo / redo | MVP | IMPLEMENTED | | Application (Command) | | `cargo test -p markup` (undo/redo tests) | `crates/markup/src/lib.rs` (`Command`, `UndoStack`) | Command pattern, applies/reverts through the same repository fns | Not IPC-wired: `UndoStack` is in-memory state needing a scoping decision (per document/page/user) before it can be Tauri-managed state |
+| MARK-06 | Markup | Undo / redo | MVP | IMPLEMENTED | Undo/Redo buttons in `PagePanel` | Application (Command) | | `cargo test -p markup` (undo/redo tests) | `crates/markup/src/lib.rs` (`Command`, `UndoStack`); `app/src-tauri/src/commands/markup.rs` (`undo_markup`/`redo_markup`/`markup_undo_status`) | Command pattern, applies/reverts through the same repository fns; IPC-wired with one `UndoStack` per page (`AppState::markup_undo`) | None — real click-through via `npm run tauri dev` still outstanding, same as every other canvas interaction |
 | MARK-07 | Markup | Comments/threads on a markup | MVP | IMPLEMENTED | | Markup | | `cargo test -p markup` (add_list_and_delete_comments, deleting_markup_cascades_its_comments) | `crates/markup/src/lib.rs` (`add_comment`/`list_comments`/`delete_comment`) | Domain+DB only, no comment UI/thread view | Collaboration model not confirmed; IPC wired (app/src-tauri); no frontend UI yet |
 | MARK-08 | Markup | Visibility toggle / lock | MVP | IMPLEMENTED | | Markup | | `cargo test -p markup` (lock_and_hidden_toggle) | `crates/markup/src/lib.rs` | | IPC wired (app/src-tauri); no frontend UI yet |
 | MEAS-01 | Measurement | Manual scale calibration | MVP | IMPLEMENTED | | Measurement | Geometry | `cargo test -p measurement` (calibrate_persists_and_round_trips) | `crates/measurement/src/lib.rs` | Domain+DB only, no calibration UI/canvas yet | IPC wired (app/src-tauri); no frontend UI yet |

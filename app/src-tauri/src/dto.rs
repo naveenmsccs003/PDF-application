@@ -135,6 +135,12 @@ pub struct MarkupDto {
     pub hidden: bool,
 }
 
+#[derive(serde::Serialize)]
+pub struct UndoStatusDto {
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
 impl From<markup::Markup> for MarkupDto {
     fn from(m: markup::Markup) -> Self {
         Self {

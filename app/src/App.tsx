@@ -17,24 +17,6 @@ import type {
 } from "./api";
 import "./App.css";
 
-/** Parses "x,y" into a Point. Throws (caller shows the error) on bad input. */
-function parsePoint(input: string): Point {
-  const parts = input.split(",").map((s) => Number(s.trim()));
-  if (parts.length !== 2 || parts.some((n) => Number.isNaN(n))) {
-    throw new Error(`expected "x,y", got "${input}"`);
-  }
-  return [parts[0], parts[1]];
-}
-
-/** Parses "x1,y1 x2,y2 ..." into Point[]. */
-function parsePoints(input: string): Point[] {
-  return input
-    .trim()
-    .split(/\s+/)
-    .filter((s) => s.length > 0)
-    .map(parsePoint);
-}
-
 function ErrorBanner({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
   if (!error) return null;
   return (
@@ -87,10 +69,10 @@ export default function App() {
       <p className="subtitle">
         Working UI over the real IPC layer (not mockups) — every action here calls into
         the Rust domain crates via Tauri commands. The page view renders the actual PDF
-        and supports click-to-draw markup (rectangle/line/arrow/cloud/text) plus
-        select/move/resize on existing shapes; everything else (projects, measurement,
-        takeoff) is still a functional control panel rather than a polished editor.
-        Zoom/pan isn't built yet.
+        and supports click-to-draw markup (rectangle/line/arrow/cloud/text), select/move/
+        resize on existing shapes, and scale calibration/length/area/count measurement,
+        all drawn directly on the canvas; projects and takeoff are still a functional
+        control panel rather than a polished editor. Zoom/pan isn't built yet.
       </p>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
@@ -358,19 +340,25 @@ function DocumentsPanel({
 }
 
 // ---------------------------------------------------------------------------
-// PDF page canvas — click-to-draw markup over the real rendered page
-// (VIEW-01/02, MARK-01–04). Page-space coordinates are pixels-at-RENDER_WIDTH
-// scaled by page.width/RENDER_WIDTH, so they stay in the same "page unit"
-// space the manual measurement inputs below already use (page.width/height,
-// as reported by PageDto, are PDF points) — consistent within this app even
-// though the y-axis here is image-top-down rather than PDF's native
-// bottom-up, since nothing yet round-trips these coordinates through a real
-// PDF export.
+// PDF page canvas — click-to-draw markup, select/move/resize, and scale
+// calibration/length/area/count measurement, all over the real rendered page
+// (VIEW-01/02, MARK-01–04, MEAS-01–07). Page-space coordinates are
+// pixels-at-RENDER_WIDTH scaled by page.width/RENDER_WIDTH, i.e. real PDF
+// points (page.width/height, as reported by PageDto, are PDF points) — so a
+// calibration/measurement taken here is in the same coordinate space as the
+// page itself, not an arbitrary unit. The y-axis stays image-top-down rather
+// than PDF's native bottom-up, since nothing yet round-trips these
+// coordinates through a real PDF export.
 // ---------------------------------------------------------------------------
 
 const RENDER_WIDTH = 900;
 
-type DrawTool = "select" | MarkupType;
+type MeasureTool = "Calibrate" | "Length" | "Area" | "Count";
+type DrawTool = "select" | MarkupType | MeasureTool;
+
+const MARKUP_DRAW_TOOLS: MarkupType[] = ["Rectangle", "Line", "Arrow", "Cloud", "Text"];
+const CLICK_ACCUMULATE_TOOLS: DrawTool[] = ["Cloud", "Area", "Count"];
+const DRAG_PAIR_TOOLS: DrawTool[] = ["Rectangle", "Line", "Arrow", "Length", "Calibrate"];
 
 function minPointsFor(type: MarkupType): number {
   if (type === "Text") return 1;
@@ -423,24 +411,36 @@ function resizeHandles(m: MarkupDto): Point[] {
 function PdfCanvas({
   page,
   markups,
+  measurements,
+  scale: pageScale,
   user,
   onCreated,
+  onScaleChanged,
+  onMeasurementCreated,
   runAction,
 }: {
   page: PageDto;
   markups: MarkupDto[];
+  measurements: MeasurementDto[];
+  scale: ScaleDto | null;
   user: UserDto;
   onCreated: () => void;
+  onScaleChanged: (scale: ScaleDto) => void;
+  onMeasurementCreated: () => void;
   runAction: (fn: () => Promise<void>) => Promise<void>;
 }) {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [tool, setTool] = useState<DrawTool>("select");
   const [color, setColor] = useState("#e53935");
+  const [lengthUnit, setLengthUnit] = useState<api.LengthUnitCode>("ft");
+  const [areaUnit, setAreaUnit] = useState<api.AreaUnitCode>("sq_ft");
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
-  const [cloudPoints, setCloudPoints] = useState<Point[]>([]);
+  const [clickPoints, setClickPoints] = useState<Point[]>([]);
   const [pendingTextPoint, setPendingTextPoint] = useState<Point | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState("");
+  const [pendingCalibration, setPendingCalibration] = useState<{ p1: Point; p2: Point } | null>(null);
+  const [pendingCalibrationInches, setPendingCalibrationInches] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [moveState, setMoveState] = useState<{ id: string; originPoints: Point[]; startPointer: Point } | null>(null);
   const [resizeState, setResizeState] = useState<{ id: string; pointIndex: number } | null>(null);
@@ -486,10 +486,41 @@ function PdfCanvas({
       onCreated();
     });
 
+  const commitLength = (p1: Point, p2: Point) =>
+    runAction(async () => {
+      if (!pageScale) throw new Error("calibrate a scale first");
+      await api.recordLength(page.id, pageScale.id, p1, p2, lengthUnit, null);
+      onMeasurementCreated();
+    });
+
+  const commitArea = (points: Point[]) =>
+    runAction(async () => {
+      if (!pageScale) throw new Error("calibrate a scale first");
+      await api.recordArea(page.id, pageScale.id, points, areaUnit, null);
+      onMeasurementCreated();
+    });
+
+  const commitCount = (points: Point[]) =>
+    runAction(async () => {
+      await api.recordCount(page.id, points, null);
+      onMeasurementCreated();
+    });
+
+  const commitPendingCalibration = () =>
+    runAction(async () => {
+      const inches = Number(pendingCalibrationInches);
+      if (pendingCalibration && pendingCalibrationInches.trim() && inches > 0) {
+        const s = await api.calibrateScale(page.id, pendingCalibration.p1, pendingCalibration.p2, inches, "imperial", user.id);
+        onScaleChanged(s);
+      }
+      setPendingCalibration(null);
+    });
+
   const selectTool = (t: DrawTool) => {
     setTool(t);
-    setCloudPoints([]);
+    setClickPoints([]);
     setPendingTextPoint(null);
+    setPendingCalibration(null);
     setSelectedId(null);
     setMoveState(null);
     setResizeState(null);
@@ -524,8 +555,8 @@ function PdfCanvas({
       setPendingTextValue("");
       return;
     }
-    if (tool === "Cloud") {
-      setCloudPoints((prev) => [...prev, p]);
+    if (CLICK_ACCUMULATE_TOOLS.includes(tool)) {
+      setClickPoints((prev) => [...prev, p]);
       return;
     }
     setDragStart(p);
@@ -572,14 +603,23 @@ function PdfCanvas({
       return;
     }
     if (!dragStart || !dragCurrent) return;
-    commitShape(tool as MarkupType, [dragStart, dragCurrent]);
+    if (tool === "Calibrate") {
+      setPendingCalibration({ p1: dragStart, p2: dragCurrent });
+      setPendingCalibrationInches("");
+    } else if (tool === "Length") {
+      commitLength(dragStart, dragCurrent);
+    } else {
+      commitShape(tool as MarkupType, [dragStart, dragCurrent]);
+    }
     setDragStart(null);
     setDragCurrent(null);
   };
 
-  const finishCloud = () => {
-    if (cloudPoints.length >= 3) commitShape("Cloud", cloudPoints);
-    setCloudPoints([]);
+  const finishClickShape = () => {
+    if (tool === "Cloud" && clickPoints.length >= 3) commitShape("Cloud", clickPoints);
+    else if (tool === "Area" && clickPoints.length >= 3) commitArea(clickPoints);
+    else if (tool === "Count" && clickPoints.length >= 1) commitCount(clickPoints);
+    setClickPoints([]);
   };
 
   const commitPendingText = () => {
@@ -589,25 +629,53 @@ function PdfCanvas({
     setPendingTextPoint(null);
   };
 
-  const isDragTool = tool !== "select" && tool !== "Cloud" && tool !== "Text";
+  const isDragPreviewTool = DRAG_PAIR_TOOLS.includes(tool);
 
   return (
     <div>
       <div className="row">
         <select value={tool} onChange={(e) => selectTool(e.target.value as DrawTool)}>
           <option value="select">Select (no draw)</option>
-          <option value="Rectangle">Draw: Rectangle</option>
-          <option value="Line">Draw: Line</option>
-          <option value="Arrow">Draw: Arrow</option>
-          <option value="Cloud">Draw: Cloud (click points, then Finish)</option>
-          <option value="Text">Draw: Text (click to place)</option>
+          <optgroup label="Markup">
+            <option value="Rectangle">Draw: Rectangle</option>
+            <option value="Line">Draw: Line</option>
+            <option value="Arrow">Draw: Arrow</option>
+            <option value="Cloud">Draw: Cloud (click points, then Finish)</option>
+            <option value="Text">Draw: Text (click to place)</option>
+          </optgroup>
+          <optgroup label="Measurement">
+            <option value="Calibrate">Measure: Calibrate scale (drag 2 pts)</option>
+            <option value="Length">Measure: Length (drag 2 pts)</option>
+            <option value="Area">Measure: Area (click points, then Finish)</option>
+            <option value="Count">Measure: Count (click points, then Finish)</option>
+          </optgroup>
         </select>
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
-        {tool === "Cloud" && (
-          <button onClick={finishCloud} disabled={cloudPoints.length < 3}>
-            Finish cloud ({cloudPoints.length} pts)
+        {MARKUP_DRAW_TOOLS.includes(tool as MarkupType) && (
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
+        )}
+        {tool === "Length" && (
+          <select value={lengthUnit} onChange={(e) => setLengthUnit(e.target.value as api.LengthUnitCode)}>
+            <option value="in">in</option>
+            <option value="ft">ft</option>
+            <option value="mm">mm</option>
+            <option value="cm">cm</option>
+            <option value="m">m</option>
+          </select>
+        )}
+        {tool === "Area" && (
+          <select value={areaUnit} onChange={(e) => setAreaUnit(e.target.value as api.AreaUnitCode)}>
+            <option value="sq_in">sq in</option>
+            <option value="sq_ft">sq ft</option>
+            <option value="sq_m">sq m</option>
+          </select>
+        )}
+        {(tool === "Length" || tool === "Area") && !pageScale && <span className="muted">calibrate a scale first</span>}
+        {CLICK_ACCUMULATE_TOOLS.includes(tool) && (
+          <button onClick={finishClickShape} disabled={tool === "Count" ? clickPoints.length < 1 : clickPoints.length < 3}>
+            Finish {tool} ({clickPoints.length} pts)
           </button>
         )}
+        <span className="muted">{pageScale ? `Scale: ${pageScale.inches_per_page_unit.toFixed(4)} in/pt (${pageScale.unit_system})` : "not calibrated"}</span>
       </div>
       <div className="pdf-canvas-wrap" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
         {imageUri ? (
@@ -639,6 +707,20 @@ function PdfCanvas({
               const shown = dragging ? { ...m, geometry: { ...m.geometry, points: livePoints! } } : m;
               return <MarkupShape key={m.id} markup={shown} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />;
             })}
+          {measurements.map((m) => (
+            <MeasurementShape key={m.id} measurement={m} toPixel={toPixel} />
+          ))}
+          {pendingCalibration && (
+            <line
+              x1={toPixel(pendingCalibration.p1)[0]}
+              y1={toPixel(pendingCalibration.p1)[1]}
+              x2={toPixel(pendingCalibration.p2)[0]}
+              y2={toPixel(pendingCalibration.p2)[1]}
+              stroke="#ff9800"
+              strokeWidth={2}
+              strokeDasharray="4 2"
+            />
+          )}
           {tool === "select" &&
             selectedId &&
             (() => {
@@ -669,14 +751,20 @@ function PdfCanvas({
                 </g>
               );
             })()}
-          {isDragTool && dragStart && dragCurrent && (
-            <PreviewShape type={tool as MarkupType} start={dragStart} current={dragCurrent} toPixel={toPixel} color={color} />
+          {isDragPreviewTool && dragStart && dragCurrent && (
+            <PreviewShape
+              type={tool}
+              start={dragStart}
+              current={dragCurrent}
+              toPixel={toPixel}
+              color={tool === "Length" || tool === "Calibrate" ? "#ff9800" : color}
+            />
           )}
-          {cloudPoints.length > 0 && (
+          {clickPoints.length > 0 && (
             <polyline
-              points={cloudPoints.map((p) => toPixel(p).join(",")).join(" ")}
+              points={clickPoints.map((p) => toPixel(p).join(",")).join(" ")}
               fill="none"
-              stroke={color}
+              stroke={tool === "Area" || tool === "Count" ? "#00897b" : color}
               strokeWidth={2}
               strokeDasharray="4 2"
             />
@@ -696,6 +784,26 @@ function PdfCanvas({
             onBlur={commitPendingText}
           />
         )}
+        {pendingCalibration &&
+          (() => {
+            const [x1, y1] = toPixel(pendingCalibration.p1);
+            const [x2, y2] = toPixel(pendingCalibration.p2);
+            return (
+              <input
+                autoFocus
+                className="canvas-text-input"
+                placeholder="real-world inches"
+                style={{ left: (x1 + x2) / 2, top: (y1 + y2) / 2 }}
+                value={pendingCalibrationInches}
+                onChange={(e) => setPendingCalibrationInches(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitPendingCalibration();
+                  if (e.key === "Escape") setPendingCalibration(null);
+                }}
+                onBlur={commitPendingCalibration}
+              />
+            );
+          })()}
       </div>
     </div>
   );
@@ -766,7 +874,7 @@ function PreviewShape({
   toPixel,
   color,
 }: {
-  type: MarkupType;
+  type: DrawTool;
   start: Point;
   current: Point;
   toPixel: (p: Point) => Point;
@@ -791,6 +899,50 @@ function PreviewShape({
   return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={2} strokeDasharray="4 2" />;
 }
 
+const MEASUREMENT_COLOR = "#00897b";
+
+/** Renders one persisted measurement plus its value/unit label directly on the canvas (MEAS-06/labels). */
+function MeasurementShape({ measurement, toPixel }: { measurement: MeasurementDto; toPixel: (p: Point) => Point }) {
+  const pts = measurement.geometry.map(toPixel);
+  const label = measurement.measurement_type === "Count" ? `${measurement.value} ct` : `${measurement.value.toFixed(2)} ${measurement.unit}`;
+  const centroid = (): Point => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
+
+  if (measurement.measurement_type === "Length") {
+    const [[x1, y1], [x2, y2]] = pts;
+    return (
+      <g>
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={MEASUREMENT_COLOR} strokeWidth={2} />
+        <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 4} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+          {label}
+        </text>
+      </g>
+    );
+  }
+  if (measurement.measurement_type === "Area") {
+    const [cx, cy] = centroid();
+    return (
+      <g>
+        <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={`${MEASUREMENT_COLOR}22`} stroke={MEASUREMENT_COLOR} strokeWidth={2} />
+        <text x={cx} y={cy} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+          {label}
+        </text>
+      </g>
+    );
+  }
+  // Count
+  const [cx, cy] = centroid();
+  return (
+    <g>
+      {pts.map((p, i) => (
+        <circle key={i} cx={p[0]} cy={p[1]} r={4} fill={MEASUREMENT_COLOR} />
+      ))}
+      <text x={cx} y={cy - 8} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+        {label}
+      </text>
+    </g>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Markup + Measurement, scoped to one page (MARK-*/MEAS-*)
 // ---------------------------------------------------------------------------
@@ -808,13 +960,30 @@ function PagePanel({
   const [markups, setMarkups] = useState<MarkupDto[]>([]);
   const [commentsByMarkup, setCommentsByMarkup] = useState<Record<string, MarkupCommentDto[]>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
+  const [undoStatus, setUndoStatus] = useState<api.UndoStatusDto>({ can_undo: false, can_redo: false });
 
-  const reloadMarkups = () => runAction(async () => setMarkups(await api.listMarkupsByPage(page.id)));
+  const reloadMarkups = () =>
+    runAction(async () => {
+      setMarkups(await api.listMarkupsByPage(page.id));
+      setUndoStatus(await api.markupUndoStatus(page.id));
+    });
 
   useEffect(() => {
     reloadMarkups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
+
+  const undoMarkup = () =>
+    runAction(async () => {
+      await api.undoMarkup(page.id);
+      await reloadMarkups();
+    });
+
+  const redoMarkup = () =>
+    runAction(async () => {
+      await api.redoMarkup(page.id);
+      await reloadMarkups();
+    });
 
   const toggleLock = (m: MarkupDto) => runAction(async () => {
     await api.setMarkupLocked(m.id, !m.locked);
@@ -848,14 +1017,7 @@ function PagePanel({
 
   // -- measurement --
   const [scale, setScale] = useState<ScaleDto | null>(null);
-  const [calP1, setCalP1] = useState("0,0");
-  const [calP2, setCalP2] = useState("2,0");
-  const [calInches, setCalInches] = useState("120");
   const [measurements, setMeasurements] = useState<MeasurementDto[]>([]);
-  const [lenP1, setLenP1] = useState("0,0");
-  const [lenP2, setLenP2] = useState("2,0");
-  const [lenUnit, setLenUnit] = useState<api.LengthUnitCode>("ft");
-  const [countMarkers, setCountMarkers] = useState("1,1 2,2 3,3");
 
   const reloadMeasurements = () =>
     runAction(async () => setMeasurements(await api.listMeasurementsByPage(page.id)));
@@ -865,25 +1027,6 @@ function PagePanel({
     reloadMeasurements();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
-
-  const calibrate = () =>
-    runAction(async () => {
-      const s = await api.calibrateScale(page.id, parsePoint(calP1), parsePoint(calP2), Number(calInches), "imperial", user.id);
-      setScale(s);
-    });
-
-  const recordLength = () =>
-    runAction(async () => {
-      if (!scale) throw new Error("calibrate a scale first");
-      await api.recordLength(page.id, scale.id, parsePoint(lenP1), parsePoint(lenP2), lenUnit, null);
-      await reloadMeasurements();
-    });
-
-  const recordCount = () =>
-    runAction(async () => {
-      await api.recordCount(page.id, parsePoints(countMarkers), null);
-      await reloadMeasurements();
-    });
 
   const removeMeasurement = (m: MeasurementDto) =>
     runAction(async () => {
@@ -897,10 +1040,29 @@ function PagePanel({
         Markup + Measurement — page {page.page_number} ({page.width.toFixed(0)}×{page.height.toFixed(0)} pt)
       </h3>
 
+      <PdfCanvas
+        page={page}
+        markups={markups}
+        measurements={measurements}
+        scale={scale}
+        user={user}
+        onCreated={reloadMarkups}
+        onScaleChanged={setScale}
+        onMeasurementCreated={reloadMeasurements}
+        runAction={runAction}
+      />
+
       <div className="two-col">
         <div>
-          <h4>Markup (MARK-01–04/07/08)</h4>
-          <PdfCanvas page={page} markups={markups} user={user} onCreated={reloadMarkups} runAction={runAction} />
+          <h4>Markup (MARK-01–04/06/07/08)</h4>
+          <div className="row">
+            <button onClick={undoMarkup} disabled={!undoStatus.can_undo}>
+              Undo
+            </button>
+            <button onClick={redoMarkup} disabled={!undoStatus.can_redo}>
+              Redo
+            </button>
+          </div>
           <ul>
             {markups.map((m) => (
               <li key={m.id}>
@@ -938,38 +1100,7 @@ function PagePanel({
 
         <div>
           <h4>Measurement (MEAS-01–07)</h4>
-          <div className="row">
-            <input placeholder="p1 x,y" value={calP1} onChange={(e) => setCalP1(e.target.value)} />
-            <input placeholder="p2 x,y" value={calP2} onChange={(e) => setCalP2(e.target.value)} />
-            <input placeholder="real-world inches" value={calInches} onChange={(e) => setCalInches(e.target.value)} />
-            <button onClick={calibrate}>Calibrate scale</button>
-          </div>
-          {scale && (
-            <p className="muted">
-              Scale: {scale.inches_per_page_unit.toFixed(4)} in/page-unit ({scale.unit_system})
-            </p>
-          )}
-
-          <div className="row">
-            <input placeholder="p1 x,y" value={lenP1} onChange={(e) => setLenP1(e.target.value)} />
-            <input placeholder="p2 x,y" value={lenP2} onChange={(e) => setLenP2(e.target.value)} />
-            <select value={lenUnit} onChange={(e) => setLenUnit(e.target.value as api.LengthUnitCode)}>
-              <option value="in">in</option>
-              <option value="ft">ft</option>
-              <option value="mm">mm</option>
-              <option value="cm">cm</option>
-              <option value="m">m</option>
-            </select>
-            <button onClick={recordLength} disabled={!scale}>
-              Record length
-            </button>
-          </div>
-
-          <div className="row">
-            <input placeholder="markers: x,y x,y ..." value={countMarkers} onChange={(e) => setCountMarkers(e.target.value)} />
-            <button onClick={recordCount}>Record count</button>
-          </div>
-
+          <p className="muted">Calibrate/length/area/count are drawn on the canvas above — pick a Measure tool.</p>
           <ul>
             {measurements.map((m) => (
               <li key={m.id}>

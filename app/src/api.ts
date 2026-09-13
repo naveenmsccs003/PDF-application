@@ -197,6 +197,19 @@ export const listMarkupComments = (markupId: string) =>
 
 export const deleteMarkupComment = (id: string) => invoke<void>("delete_markup_comment", { id });
 
+// -- markup undo/redo (MARK-06) --
+
+export interface UndoStatusDto {
+  can_undo: boolean;
+  can_redo: boolean;
+}
+
+export const undoMarkup = (pageId: string) => invoke<boolean>("undo_markup", { pageId });
+
+export const redoMarkup = (pageId: string) => invoke<boolean>("redo_markup", { pageId });
+
+export const markupUndoStatus = (pageId: string) => invoke<UndoStatusDto>("markup_undo_status", { pageId });
+
 // -- measurement --
 
 export const calibrateScale = (

@@ -89,7 +89,11 @@ impl MarkupGeometry {
         }
     }
 
-    fn validate(&self, kind: MarkupType) -> Result<(), MarkupError> {
+    /// `pub` so callers routing through `Command`/`UndoStack` (which apply
+    /// via `insert_full`/`update_geometry`'s raw writes, not `create`) can
+    /// validate before constructing a command — `Command::apply` itself
+    /// doesn't, so this is the one place that guarantee still needs to run.
+    pub fn validate(&self, kind: MarkupType) -> Result<(), MarkupError> {
         let min = kind.min_points();
         if self.points.len() < min {
             return Err(MarkupError::TooFewPoints {

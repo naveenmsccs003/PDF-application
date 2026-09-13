@@ -179,6 +179,67 @@ Phase 0 starts until the table above is clear.
       actually selecting/dragging a real markup through a signed-in
       `npm run tauri dev` session is still Naveen's check to run, not
       something this environment can drive.
+  - **Measurement moved onto the canvas (2026-09-13)**: closed the other
+    gap this pass's own notes called out ("everything UI-facing (calibration
+    interaction, measurement labels on the canvas)" from Phase 4's early
+    pass). `PdfCanvas` gains four Measure tools alongside the five Markup
+    ones: Calibrate (drag 2 points, then an inline "real-world inches"
+    input — same interaction shape as the Text tool's inline label, commits
+    via the existing `calibrate_scale` command), Length (drag 2 points,
+    commits via `record_length` in a toolbar-selected unit), Area (click
+    points then Finish, commits via `record_area`), Count (click points then
+    Finish, commits via `record_count`). All four reuse the drag-pair /
+    click-accumulate gesture patterns the markup tools already established
+    rather than inventing new interaction shapes. No backend change needed —
+    all four IPC commands already existed and took arbitrary geometry; only
+    `record_area` had no frontend caller before this. Persisted measurements
+    now render back onto the canvas with their value+unit as a text label
+    (`MeasurementShape` — line+midpoint label for Length, polygon+centroid
+    label for Area, dots+centroid label for Count), closing MEAS-06's
+    "labels" half for real this time (the manual-input version stored a
+    label but never displayed one on anything resembling a drawing surface).
+    Replaced the old free-text "p1 x,y"/"p2 x,y"/"markers: x,y x,y ..."
+    inputs entirely — they used arbitrary example coordinates ("0,0"/"2,0")
+    that didn't correspond to actual page geometry, whereas canvas clicks
+    are real PDF-point coordinates via the same `toPagePoint` conversion
+    markup already uses, so a calibration taken here is actually anchored to
+    the drawing. `parsePoint`/`parsePoints` helpers (only used by the removed
+    inputs) were deleted rather than left dead.
+    - Verified: `cargo check`/`cargo build -p app` unaffected (no Rust
+      changes this pass — every IPC command used already existed). `npm run
+      build` (tsc + vite) — clean, no type errors. `npm run dev` served `/`
+      with a 200 before being stopped. **NOT verified**: same live-IPC gap
+      as every canvas interaction so far — calibrating a scale and recording
+      a real length/area/count through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run.
+  - **MARK-06 undo/redo wired (2026-09-13)**: closed the scoping question
+    this pass's earlier notes deferred as "a real design question, not a
+    mechanical wiring step" — resolved as **one `UndoStack` per page**
+    (`AppState::markup_undo: Mutex<HashMap<page_id, UndoStack>>`), not per
+    document or per user: the UI is already organized per page (`PdfCanvas`/
+    `PagePanel` both take one `PageDto`), so undoing while looking at page 3
+    shouldn't revert something done on page 1; per-user needed no separate
+    handling since each user already runs their own Tauri process, so this
+    in-memory state is implicitly scoped to one user by being one process's
+    memory. `create_markup`/`update_markup_geometry`/`update_markup_style`/
+    `set_markup_locked`/`set_markup_hidden`/`delete_markup` now build a
+    `markup::Command` and route it through that page's stack instead of
+    calling `markup::create`/`update_geometry`/etc. directly — geometry
+    validation (previously only inside `markup::create`/`update_geometry`,
+    which `Command::apply` bypasses) had to be exposed as `pub fn
+    MarkupGeometry::validate` so the app layer can still enforce it before
+    handing a command to the stack. Added `undo_markup`/`redo_markup`/
+    `markup_undo_status` commands; the frontend adds Undo/Redo buttons next
+    to the markup list, disabled from `markup_undo_status`, refreshed
+    after every markup mutation (create/move/resize/lock/hide/delete all
+    funnel through the existing `reloadMarkups`).
+    - Verified: `cargo check -p markup -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 80/80 passing, no
+      regressions (`markup` still 11/11 — the undo/redo tests already
+      covered `UndoStack` itself; this pass only added callers). `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap —
+      actually creating a shape, undoing it, and redoing it through a
+      signed-in `npm run tauri dev` session is still Naveen's check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
