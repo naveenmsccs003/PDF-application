@@ -1,0 +1,8 @@
+[package]
+name = "export"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pdf_core = { path = "../pdf_core" }
+markup = { path = "../markup" }

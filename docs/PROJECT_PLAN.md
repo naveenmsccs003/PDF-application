@@ -345,6 +345,66 @@ Phase 0 starts until the table above is clear.
       through a signed-in `npm run tauri dev` session is still Naveen's
       check to run. Also not built: RFI-03 (drawing revision tracking,
       overlaps `DocumentVersion`) and RFI-04 (comparison/overlay, BACKLOG).
+  - **EXPORT-01 flattened PDF export (2026-09-13)**: the first feature that
+    touches `pdf_core` itself rather than composing on top of it — needed
+    to actually burn `Markup` rows into a real PDF file rather than just
+    listing/rendering them. `pdfium-render` (already a `pdf_core`
+    dependency for rendering) turned out capable of far more than the
+    module doc's "Annotation support ... not exposed here yet" note
+    assumed when it was written pre-Markup-UI: it can create page path/text
+    objects and call Pdfium's own `FPDFPage_Flatten` (`PdfPage::flatten()`
+    in this crate version, gated behind a cargo feature this workspace
+    doesn't enable — confirmed by reading the vendored source, not
+    assumed). Added one new `PdfDocument` trait method,
+    `flatten_page_with_annotations`, with a no-op default body so the
+    `document`/`e2e_tests` `PdfDocument` fakes (which only exercise
+    import) didn't need touching — only `PdfiumDocument` overrides it.
+    `FlattenAnnotation` (`Path`/`Text`) is deliberately generic — no
+    `Markup`/`MarkupType` awareness inside `pdf_core`, keeping the "Core
+    Engine PDF abstraction" layer engine-facing, not domain-facing — so a
+    new `crates/export` crate owns the `Markup` → `FlattenAnnotation`
+    translation (rectangle → 4-corner closed path, line/arrow → open path
+    with no arrowhead drawn since that's cosmetic, cloud → closed polygon,
+    text → a real text object in Helvetica) plus the y-flip from `markup`'s
+    top-down coordinate convention into PDF's native bottom-up space.
+    `export_flattened_pdf` skips hidden markups and pages with nothing to
+    draw, then saves to a new file — the original is never touched. IPC:
+    `export_flattened_pdf(document_id, output_path)`, routed through the
+    existing dedicated PDF-engine thread (`commands::pdf`'s
+    `PdfEngineRequest` enum, same reason as the other two variants —
+    `PdfiumEngine`/`PdfDocument` aren't `Send`); frontend gets
+    `output_path` from a save dialog (`@tauri-apps/plugin-dialog`'s
+    `save()`, the write counterpart to the `open()` DOC-01's import already
+    uses) rather than the backend inventing a path.
+    - **Found and fixed a pre-existing test flake while verifying this**:
+      `cargo test -p pdf_core` runs its tests in parallel by default, and
+      this pass's 3 new real-`PdfiumEngine` tests brought the total to 7 —
+      enough to reliably hit the exact deadlock
+      `crates/pdf_engine_spike/README.md` already documents (a second
+      PDFium binding alive in the same process deadlocks). This was
+      already a latent flake at 4 such tests, just unlikely enough not to
+      have been caught yet — confirmed by reproducing the hang, then
+      confirming `--test-threads=1` alone fixed it. Fixed properly with a
+      `Mutex` in the test module serializing just the real-engine tests
+      (not the synthetic-fake ones), rather than only documenting
+      "remember `--test-threads=1`" — the earlier "cargo test -p pdf_core"
+      verification lines elsewhere in this doc were not actually reliable
+      before this fix.
+    - Verified: `cargo test -p export` — 5/5 passing (text/rectangle
+      conversion incl. the y-flip, invalid-color fallback, hidden-markup
+      and empty-page skipping). `cargo test -p pdf_core` — 10/10 passing
+      *and reproducibly so* (ran 4x back to back after the `Mutex` fix),
+      including 3 new tests against the real sample PDF + `libpdfium.so`:
+      flattening changes the rendered output, an out-of-range page index
+      still errors, and a flattened, saved file reopens with the same page
+      count. `cargo check -p export -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 95/95 passing. `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap
+      as every feature so far — actually exporting a real document with
+      real markups through a signed-in `npm run tauri dev` session, and
+      opening the resulting file in another PDF viewer to confirm the
+      markups are really burned in, is still Naveen's check to run. Not
+      built: EXPORT-02 (print) and EXPORT-03 (export/handoff package).
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

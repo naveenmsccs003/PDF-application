@@ -50,6 +50,17 @@ pub enum PdfEngineRequest {
         width: u32,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
     },
+    /// EXPORT-01: `markup::Markup` is plain data (`String`/enum/`Vec<(f64,
+    /// f64)>`/`Option<String>`/`bool` fields, no PDFium handles), so it's
+    /// `Send` and can cross this channel like every other request payload
+    /// here — only the actual `PdfiumDocument` (built and dropped entirely
+    /// on this thread, inside `export::export_flattened_pdf`) never does.
+    ExportFlattened {
+        path: String,
+        output_path: String,
+        markups_by_page_index: std::collections::HashMap<usize, Vec<markup::Markup>>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// Spawns the one thread that owns the one `PdfiumEngine` for the process.
@@ -98,6 +109,14 @@ pub fn spawn_pdf_engine_thread() -> Option<mpsc::Sender<PdfEngineRequest>> {
                     })();
                     let _ = reply.send(result);
                 }
+                PdfEngineRequest::ExportFlattened { path, output_path, markups_by_page_index, reply } => {
+                    let result = (|| -> Result<(), String> {
+                        let mut document = engine.open(Path::new(&path)).map_err(|e| e.to_string())?;
+                        export::export_flattened_pdf(&mut document, &markups_by_page_index, Path::new(&output_path))
+                            .map_err(|e| e.to_string())
+                    })();
+                    let _ = reply.send(result);
+                }
             }
         }
     });
@@ -128,6 +147,26 @@ fn render_thumbnail(state: &AppState, path: &str, page_index: usize, width: u32)
             path: path.to_string(),
             page_index,
             width,
+            reply: reply_tx,
+        })
+        .map_err(|_| "PDF engine thread is not running".to_string())?;
+    reply_rx.recv().map_err(|_| "PDF engine thread dropped the reply channel".to_string())?
+}
+
+fn export_flattened(
+    state: &AppState,
+    path: &str,
+    output_path: &str,
+    markups_by_page_index: std::collections::HashMap<usize, Vec<markup::Markup>>,
+) -> Result<(), String> {
+    let tx = state.pdf_engine.as_ref().ok_or("PDF engine unavailable (libpdfium.so not found)")?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.lock()
+        .map_err(|e| e.to_string())?
+        .send(PdfEngineRequest::ExportFlattened {
+            path: path.to_string(),
+            output_path: output_path.to_string(),
+            markups_by_page_index,
             reply: reply_tx,
         })
         .map_err(|_| "PDF engine thread is not running".to_string())?;
@@ -202,4 +241,35 @@ pub fn render_page_thumbnail(
     let png_bytes = render_thumbnail(&state, &file_path, page_index, width)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     Ok(format!("data:image/png;base64,{encoded}"))
+}
+
+/// EXPORT-01: burns every page's non-hidden markups into a flattened copy
+/// of the document's PDF, saved to `output_path` (the frontend gets that
+/// path from a save dialog rather than this command inventing one, same
+/// division of responsibility as `import_pdf_document` taking an
+/// already-chosen `path` from an open dialog).
+#[tauri::command]
+pub fn export_flattened_pdf(
+    state: tauri::State<AppState>,
+    document_id: String,
+    output_path: String,
+) -> Result<(), String> {
+    let (file_path, pages) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let doc = document::get_document(&conn, &document_id).map_err(|e| e.to_string())?;
+        let pages = document::list_pages(&conn, &document_id).map_err(|e| e.to_string())?;
+        (doc.file_path, pages)
+    };
+
+    let mut markups_by_page_index = std::collections::HashMap::new();
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        for page in &pages {
+            let markups = markup::list_by_page(&conn, &page.id).map_err(|e| e.to_string())?;
+            let page_index = (page.page_number - 1).max(0) as usize;
+            markups_by_page_index.insert(page_index, markups);
+        }
+    }
+
+    export_flattened(&state, &file_path, &output_path, markups_by_page_index)
 }

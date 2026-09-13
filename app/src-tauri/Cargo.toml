@@ -33,6 +33,7 @@ markup = { path = "../../crates/markup" }
 measurement = { path = "../../crates/measurement" }
 takeoff = { path = "../../crates/takeoff" }
 rfi = { path = "../../crates/rfi" }
+export = { path = "../../crates/export" }
 tauri-plugin-dialog = "2"
 
 

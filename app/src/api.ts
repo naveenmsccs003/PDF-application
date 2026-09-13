@@ -163,6 +163,9 @@ export const importPdfDocument = (path: string, title: string, projectId: string
 export const renderPageThumbnail = (documentId: string, pageNumber: number, width: number) =>
   invoke<string>("render_page_thumbnail", { documentId, pageNumber, width });
 
+export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
+  invoke<void>("export_flattened_pdf", { documentId, outputPath });
+
 export const listDocumentsForProject = (projectId: string) =>
   invoke<DocumentDto[]>("list_documents_for_project", { projectId });
 

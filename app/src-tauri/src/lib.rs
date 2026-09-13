@@ -66,6 +66,7 @@ pub fn run() {
             greet,
             commands::pdf::import_pdf_document,
             commands::pdf::render_page_thumbnail,
+            commands::pdf::export_flattened_pdf,
             commands::project::create_user,
             commands::project::get_user_by_email,
             commands::project::create_project,

@@ -6,8 +6,11 @@
 //! Scope is deliberately limited to what Phase 2 (PDF Core) needs — open,
 //! page metadata, render, extract text, save/reopen — and to what the
 //! Section 6 validation spike (`crates/pdf_engine_spike`) actually proved
-//! works. Annotation support belongs to Phase 3 (Markup) and is not
-//! exposed here yet.
+//! works, plus `flatten_page_with_annotations` for EXPORT-01 (flattened PDF
+//! export), added once there was a real `markup` domain to burn into a
+//! page. Annotation *editing* (an interactive PDF annotation layer,
+//! distinct from write-once export) still belongs to Phase 3 and isn't
+//! exposed here.
 
 use std::path::Path;
 
@@ -41,6 +44,31 @@ pub trait PdfEngine {
     fn open<'e>(&'e self, path: &Path) -> Result<Self::Document<'e>, PdfCoreError>;
 }
 
+/// One drawable annotation to burn into a page for EXPORT-01. Deliberately
+/// minimal — a stroked polyline/polygon covers Rectangle/Line/Arrow/Cloud
+/// markups (a rectangle is its 4 corners as a closed path; Arrow's
+/// direction indicator isn't drawn — the shaft is enough to show what was
+/// marked up, and a real arrowhead is cosmetic, not required by EXPORT-01)
+/// and one text run covers Text markups. Coordinates are PDF points,
+/// bottom-up (PDF's native origin) — callers translate from whatever
+/// top-down coordinate space their own geometry uses before constructing
+/// one of these.
+pub enum FlattenAnnotation {
+    Path {
+        points: Vec<(f32, f32)>,
+        closed: bool,
+        stroke_rgb: (u8, u8, u8),
+        stroke_width_pt: f32,
+    },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        font_size_pt: f32,
+        rgb: (u8, u8, u8),
+    },
+}
+
 pub trait PdfDocument {
     fn page_count(&self) -> usize;
 
@@ -58,6 +86,24 @@ pub trait PdfDocument {
     fn extract_text(&self, page_index: usize) -> Result<String, PdfCoreError>;
 
     fn save(&self, path: &Path) -> Result<(), PdfCoreError>;
+
+    /// EXPORT-01: burns `annotations` into `page_index`'s actual page
+    /// content, so they survive as real PDF page content rather than
+    /// separate application-level `Markup` rows — the point of a
+    /// "flattened" export. Default implementation is a no-op, so the
+    /// `PdfDocument` test doubles in `document`/`e2e_tests` (which exercise
+    /// import, not export) don't need updating for this; `PdfiumDocument`
+    /// below overrides it with the real implementation. Takes `&mut self`
+    /// (unlike every other method here) because adding page content and
+    /// registering a font are the one operation in this trait pdfium-render
+    /// itself requires mutable access for.
+    fn flatten_page_with_annotations(
+        &mut self,
+        _page_index: usize,
+        _annotations: &[FlattenAnnotation],
+    ) -> Result<(), PdfCoreError> {
+        Ok(())
+    }
 
     /// Renders one tile of `page_index` at zoom level `zoomed_width` (the
     /// full page's pixel width at the current zoom — height follows from
@@ -267,6 +313,68 @@ impl<'e> PdfDocument for PdfiumDocument<'e> {
         self.document.save_to_file(path)?;
         Ok(())
     }
+
+    fn flatten_page_with_annotations(
+        &mut self,
+        page_index: usize,
+        annotations: &[FlattenAnnotation],
+    ) -> Result<(), PdfCoreError> {
+        use pdfium_render::prelude::{
+            PdfColor, PdfPageObjectCommon, PdfPageObjectsCommon, PdfPagePathObject, PdfPoints,
+        };
+
+        // Fetched before `page` below rather than per-`Text` annotation:
+        // `fonts_mut()` needs `&mut self.document`, and doing this first
+        // (extracting just an owned, Copy `PdfFontToken`) means the loop
+        // afterwards only ever needs `&self.document`, which coexists fine
+        // with holding `page` at the same time.
+        let font = self.document.fonts_mut().helvetica();
+
+        let mut page = self
+            .document
+            .pages()
+            .get(page_index as u16)
+            .map_err(|_| PdfCoreError::PageIndexOutOfRange(page_index))?;
+
+        for annotation in annotations {
+            match annotation {
+                FlattenAnnotation::Path { points, closed, stroke_rgb, stroke_width_pt } => {
+                    let Some((&(x0, y0), rest)) = points.split_first() else {
+                        continue;
+                    };
+                    let color = PdfColor::new(stroke_rgb.0, stroke_rgb.1, stroke_rgb.2, 255);
+                    let mut path = PdfPagePathObject::new(
+                        &self.document,
+                        PdfPoints::new(x0),
+                        PdfPoints::new(y0),
+                        Some(color),
+                        Some(PdfPoints::new(*stroke_width_pt)),
+                        None,
+                    )?;
+                    for &(x, y) in rest {
+                        path.line_to(PdfPoints::new(x), PdfPoints::new(y))?;
+                    }
+                    if *closed {
+                        path.close_path()?;
+                    }
+                    page.objects_mut().add_path_object(path)?;
+                }
+                FlattenAnnotation::Text { x, y, text, font_size_pt, rgb } => {
+                    let mut object = page.objects_mut().create_text_object(
+                        PdfPoints::new(*x),
+                        PdfPoints::new(*y),
+                        text.as_str(),
+                        font,
+                        PdfPoints::new(*font_size_pt),
+                    )?;
+                    object.set_fill_color(PdfColor::new(rgb.0, rgb.1, rgb.2, 255))?;
+                }
+            }
+        }
+
+        page.flatten()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +398,24 @@ mod tests {
         candidate.exists().then_some(candidate)
     }
 
+    /// Serializes every test below that constructs a real `PdfiumEngine`
+    /// (there were already 4 before this pass added 3 more). Discovered
+    /// while adding this module's new flatten/export tests: `cargo test -p
+    /// pdf_core` runs tests in parallel threads by default, and two
+    /// `PdfiumEngine::new()` calls alive at the same time in one process is
+    /// exactly the deadlock `crates/pdf_engine_spike/README.md` already
+    /// documents (a second PDFium binding in the same process deadlocks) —
+    /// so this was already a latent flake, just unlikely enough with only 4
+    /// real-engine tests to not have been hit yet; 7 made it reliably
+    /// reproduce. A `Mutex` guard is cheaper and more durable than telling
+    /// everyone who runs this suite to remember `--test-threads=1`; the
+    /// synthetic-fake tests (`tile_cache`, `tile_grid`) don't touch this
+    /// lock and keep running in parallel.
+    fn real_engine_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn open_and_read_document_metadata() {
         let lib_path = spike_lib_path();
@@ -302,6 +428,7 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
         let document = engine.open(&pdf_path).expect("document should open");
 
@@ -338,6 +465,7 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
         let document = engine.open(&pdf_path).expect("document should open");
 
@@ -383,6 +511,7 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
         let document = engine.open(&pdf_path).expect("document should open");
 
@@ -395,6 +524,112 @@ mod tests {
         assert_eq!(thumb_image.width(), 100);
         let thumb_aspect = thumb_image.width() as f64 / thumb_image.height() as f64;
         assert!((full_aspect - thumb_aspect).abs() < 0.01);
+    }
+
+    #[test]
+    fn flatten_page_with_annotations_changes_the_rendered_page() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path).expect("document should open");
+
+        let before = document.render_page_to_png(0, 400).unwrap();
+
+        document
+            .flatten_page_with_annotations(
+                0,
+                &[
+                    FlattenAnnotation::Path {
+                        points: vec![(50.0, 50.0), (200.0, 50.0), (200.0, 150.0), (50.0, 150.0)],
+                        closed: true,
+                        stroke_rgb: (255, 0, 0),
+                        stroke_width_pt: 3.0,
+                    },
+                    FlattenAnnotation::Text {
+                        x: 60.0,
+                        y: 160.0,
+                        text: "exported".to_string(),
+                        font_size_pt: 18.0,
+                        rgb: (0, 0, 255),
+                    },
+                ],
+            )
+            .expect("flattening with annotations should succeed");
+
+        let after = document.render_page_to_png(0, 400).unwrap();
+        assert_ne!(before, after, "flattened annotations should change the rendered page");
+    }
+
+    #[test]
+    fn flatten_page_with_annotations_out_of_range_page_is_a_typed_error() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path).expect("document should open");
+
+        let err = document
+            .flatten_page_with_annotations(9999, &[])
+            .expect_err("out-of-range page index should error");
+        assert!(matches!(err, PdfCoreError::PageIndexOutOfRange(9999)));
+    }
+
+    #[test]
+    fn flattened_export_saves_and_reopens_with_the_same_page_count() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path).expect("document should open");
+        let original_page_count = document.page_count();
+
+        document
+            .flatten_page_with_annotations(
+                0,
+                &[FlattenAnnotation::Path {
+                    points: vec![(10.0, 10.0), (100.0, 100.0)],
+                    closed: false,
+                    stroke_rgb: (0, 255, 0),
+                    stroke_width_pt: 5.0,
+                }],
+            )
+            .unwrap();
+
+        let out_path = std::env::temp_dir().join(format!(
+            "pdf_core_flatten_export_test_{}.pdf",
+            std::process::id()
+        ));
+        document.save(&out_path).expect("save should succeed");
+
+        let reopened = engine.open(&out_path).expect("flattened export should reopen");
+        assert_eq!(reopened.page_count(), original_page_count);
+
+        let _ = std::fs::remove_file(&out_path);
     }
 
     /// A `PdfDocument` test double that fabricates a solid-color PNG instead
@@ -495,6 +730,7 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
         let document = engine.open(&pdf_path).expect("document should open");
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import type {
   DocumentDto,
@@ -291,6 +291,17 @@ function DocumentsPanel({
   const selectedPage = pages.find((p) => p.id === selectedPageId) ?? null;
   const closeDocument = () => setSelectedDocumentId(null);
 
+  const exportFlattenedPdf = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        defaultPath: `${selectedDocument.title}-flattened.pdf`,
+      });
+      if (!outputPath) return;
+      await api.exportFlattenedPdf(selectedDocument.id, outputPath);
+    });
+
   return (
     <section className="card">
       <h2>Documents (DOC-01/03/04/05)</h2>
@@ -304,6 +315,7 @@ function DocumentsPanel({
           ))}
         </select>
         {selectedDocument && <button onClick={closeDocument}>Close document</button>}
+        {selectedDocument && <button onClick={exportFlattenedPdf}>Export flattened PDF…</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
         <button onClick={importPdf}>Import PDF…</button>
       </div>
