@@ -1,0 +1,6 @@
+/target
+/app/node_modules
+/app/dist
+/app/src-tauri/target
+crates/pdf_engine_spike/lib/
+crates/pdf_engine_spike/spike_output_*

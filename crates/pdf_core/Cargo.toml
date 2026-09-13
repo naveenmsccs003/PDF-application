@@ -1,0 +1,12 @@
+[package]
+name = "pdf_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pdfium-render = { version = "0.8", features = ["image"] }
+image = { version = "0.25", features = ["png"] }
+thiserror = "1"
+lru = "0.12"
+
+[dev-dependencies]
