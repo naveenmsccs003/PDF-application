@@ -355,6 +355,7 @@ const RENDER_WIDTH = 900;
 
 type MeasureTool = "Calibrate" | "Length" | "Area" | "Count";
 type DrawTool = "select" | MarkupType | MeasureTool;
+type SelectRequest = { id: string; nonce: number };
 
 const MARKUP_DRAW_TOOLS: MarkupType[] = ["Rectangle", "Line", "Arrow", "Cloud", "Text"];
 const CLICK_ACCUMULATE_TOOLS: DrawTool[] = ["Cloud", "Area", "Count"];
@@ -418,6 +419,8 @@ function PdfCanvas({
   onScaleChanged,
   onMeasurementCreated,
   runAction,
+  onSelectionChange,
+  selectRequest,
 }: {
   page: PageDto;
   markups: MarkupDto[];
@@ -428,6 +431,8 @@ function PdfCanvas({
   onScaleChanged: (scale: ScaleDto) => void;
   onMeasurementCreated: () => void;
   runAction: (fn: () => Promise<void>) => Promise<void>;
+  onSelectionChange: (id: string | null) => void;
+  selectRequest: SelectRequest | null;
 }) {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [tool, setTool] = useState<DrawTool>("select");
@@ -465,6 +470,24 @@ function PdfCanvas({
       cancelled = true;
     };
   }, [page.id, page.document_id, page.page_number]);
+
+  const updateSelection = (id: string | null) => {
+    setSelectedId(id);
+    onSelectionChange(id);
+  };
+
+  useEffect(() => {
+    if (!selectRequest) return;
+    setTool("select");
+    updateSelection(selectRequest.id);
+    setClickPoints([]);
+    setPendingTextPoint(null);
+    setPendingCalibration(null);
+    setMoveState(null);
+    setResizeState(null);
+    setLivePoints(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectRequest]);
 
   const toPagePoint = (clientX: number, clientY: number): Point => {
     const rect = svgRef.current!.getBoundingClientRect();
@@ -521,7 +544,7 @@ function PdfCanvas({
     setClickPoints([]);
     setPendingTextPoint(null);
     setPendingCalibration(null);
-    setSelectedId(null);
+    updateSelection(null);
     setMoveState(null);
     setResizeState(null);
     setLivePoints(null);
@@ -543,7 +566,7 @@ function PdfCanvas({
         }
       }
       const hit = [...markups].reverse().find((m) => !m.hidden && hitTest(m, p, tolerance));
-      setSelectedId(hit ? hit.id : null);
+      updateSelection(hit ? hit.id : null);
       if (hit && !hit.locked) {
         setMoveState({ id: hit.id, originPoints: hit.geometry.points, startPointer: p });
         setLivePoints(hit.geometry.points);
@@ -721,8 +744,7 @@ function PdfCanvas({
               strokeDasharray="4 2"
             />
           )}
-          {tool === "select" &&
-            selectedId &&
+          {selectedId &&
             (() => {
               const sel = markups.find((m) => m.id === selectedId);
               if (!sel) return null;
@@ -961,6 +983,8 @@ function PagePanel({
   const [commentsByMarkup, setCommentsByMarkup] = useState<Record<string, MarkupCommentDto[]>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
   const [undoStatus, setUndoStatus] = useState<api.UndoStatusDto>({ can_undo: false, can_redo: false });
+  const [selectedMarkupId, setSelectedMarkupId] = useState<string | null>(null);
+  const [selectRequest, setSelectRequest] = useState<SelectRequest | null>(null);
 
   const reloadMarkups = () =>
     runAction(async () => {
@@ -1050,11 +1074,13 @@ function PagePanel({
         onScaleChanged={setScale}
         onMeasurementCreated={reloadMeasurements}
         runAction={runAction}
+        onSelectionChange={setSelectedMarkupId}
+        selectRequest={selectRequest}
       />
 
       <div className="two-col">
         <div>
-          <h4>Markup (MARK-01–04/06/07/08)</h4>
+          <h4>Markup (MARK-01–06/07/08)</h4>
           <div className="row">
             <button onClick={undoMarkup} disabled={!undoStatus.can_undo}>
               Undo
@@ -1063,14 +1089,15 @@ function PagePanel({
               Redo
             </button>
           </div>
-          <ul>
+          <ul className="layer-list">
             {markups.map((m) => (
-              <li key={m.id}>
+              <li key={m.id} className={m.id === selectedMarkupId ? "layer-row selected" : "layer-row"}>
                 <div>
                   <strong>{m.markup_type}</strong> {JSON.stringify(m.geometry.points)}{" "}
                   {m.locked && <span className="tag">locked</span>} {m.hidden && <span className="tag">hidden</span>}
                 </div>
                 <div className="row">
+                  <button onClick={() => setSelectRequest({ id: m.id, nonce: Date.now() })}>select</button>
                   <button onClick={() => toggleLock(m)}>{m.locked ? "unlock" : "lock"}</button>
                   <button onClick={() => toggleHidden(m)}>{m.hidden ? "show" : "hide"}</button>
                   <button onClick={() => removeMarkup(m)}>delete</button>

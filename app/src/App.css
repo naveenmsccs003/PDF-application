@@ -71,6 +71,23 @@ h1 {
   margin-left: 0.3em;
 }
 
+.layer-list {
+  padding-left: 0;
+  list-style: none;
+}
+
+.layer-row {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.4em;
+  margin-bottom: 0.3em;
+}
+
+.layer-row.selected {
+  background: #e3f2fd;
+  border-color: #2196f3;
+}
+
 input,
 select,
 button {

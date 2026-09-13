@@ -240,6 +240,30 @@ Phase 0 starts until the table above is clear.
       build` — clean, no type errors. **NOT verified**: same live-IPC gap —
       actually creating a shape, undoing it, and redoing it through a
       signed-in `npm run tauri dev` session is still Naveen's check to run.
+  - **MARK-05 layer panel wired to canvas selection (2026-09-13)**: the
+    markup list in `PagePanel` already existed (lock/hide/delete/comments
+    per row) but wasn't a "layer panel" in the interactive sense — it
+    couldn't select anything on the canvas, and canvas selection wasn't
+    reflected back in the list. Closed both directions: `selectedId` moved
+    out of `PdfCanvas`'s exclusive internal state — it still owns the state
+    (needed locally for drag/resize hit-testing), but now reports every
+    change up via `onSelectionChange`, and accepts external selection
+    requests via a `selectRequest: {id, nonce}` prop (a nonce so clicking
+    the same already-selected row again still re-triggers the effect).
+    `PagePanel` renders the matching row with a `.selected` highlight and
+    gives each row a "select" button that posts a `selectRequest`, which
+    `PdfCanvas` handles by switching its own tool to `"select"` and clearing
+    any in-progress draw/drag state so the highlight and resize handles
+    show immediately. Did not add z-order/reordering — there's no stored
+    order field on `Markup` to reorder by, and adding one is a schema
+    change this pass didn't need; "layer panel" here means list-canvas
+    selection sync, not a rearrangeable stacking order.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. No Rust
+      changes this pass. **NOT verified**: same live-IPC gap as every
+      canvas interaction so far — clicking a list row and seeing the
+      canvas highlight (and vice versa) through a signed-in
+      `npm run tauri dev` session is still Naveen's check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
