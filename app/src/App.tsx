@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import type {
   DocumentDto,
+  DocumentVersionDto,
   MarkupCommentDto,
   MarkupDto,
   MarkupType,
@@ -399,6 +401,8 @@ function DocumentsPanel({
           <RfiPanel document={selectedDocument} pages={pages} user={user} runAction={runAction} />
 
           <RecoveryPanel document={selectedDocument} runAction={runAction} />
+
+          <DocumentVersionsPanel document={selectedDocument} user={user} runAction={runAction} />
         </div>
       )}
     </section>
@@ -1544,6 +1548,57 @@ function RecoveryPanel({
           <li key={s.id}>
             {s.created_at} <button onClick={() => restore(s)}>Restore…</button>{" "}
             <button onClick={() => discard(s)}>Discard</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Document revisions (RFI-03 / DOC-02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+function DocumentVersionsPanel({
+  document: doc,
+  user,
+  runAction,
+}: {
+  document: DocumentDto;
+  user: UserDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [versions, setVersions] = useState<DocumentVersionDto[]>([]);
+
+  const reload = () => runAction(async () => setVersions(await api.listDocumentVersions(doc.id)));
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  const saveRevision = () =>
+    runAction(async () => {
+      await api.saveDocumentRevision(doc.id, user.id);
+      await reload();
+    });
+
+  const openRevision = (v: DocumentVersionDto) => runAction(async () => openPath(v.file_snapshot_path));
+
+  return (
+    <div className="nested">
+      <h3>Revisions (RFI-03)</h3>
+      <p className="muted">
+        Each saved revision is a flattened snapshot of this drawing (current markups included) at that moment —
+        version history per sheet, per the master list.
+      </p>
+      <div className="row">
+        <button onClick={saveRevision}>Save revision</button>
+      </div>
+      <ul>
+        {versions.map((v) => (
+          <li key={v.id}>
+            v{v.version_number} <button onClick={() => openRevision(v)}>Open…</button>
           </li>
         ))}
       </ul>

@@ -91,6 +91,7 @@ pub fn run() {
             commands::document::reorder_pages,
             commands::document::create_document_version,
             commands::document::list_document_versions,
+            commands::document::save_document_revision,
             commands::markup::create_markup,
             commands::markup::get_markup,
             commands::markup::list_markups_by_page,

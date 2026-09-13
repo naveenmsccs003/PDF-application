@@ -214,6 +214,9 @@ export const createDocumentVersion = (documentId: string, fileSnapshotPath: stri
 export const listDocumentVersions = (documentId: string) =>
   invoke<DocumentVersionDto[]>("list_document_versions", { documentId });
 
+export const saveDocumentRevision = (documentId: string, createdBy: string | null) =>
+  invoke<DocumentVersionDto>("save_document_revision", { documentId, createdBy });
+
 // -- markup --
 
 export const createMarkup = (

@@ -63,3 +63,35 @@ pub fn list_document_versions(state: tauri::State<AppState>, document_id: String
         .map(|versions| versions.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
 }
+
+/// RFI-03 (drawing revision tracking): the registry's own note calls this
+/// "overlaps DocumentVersion" — `create_document_version` above already
+/// covers the domain logic, it just requires a snapshot file to already
+/// exist at some path. This command produces that snapshot itself (a
+/// flattened copy, reusing EXPORT-01's `export_document_flattened_pdf`,
+/// same as REL-01's autosave and EXPORT-03's handoff package) under
+/// `data_dir/versions/`, then records it — so "save a revision" is one
+/// user action instead of "export somewhere, then remember to also record
+/// a version pointing at it."
+#[tauri::command]
+pub fn save_document_revision(
+    state: tauri::State<AppState>,
+    document_id: String,
+    created_by: Option<String>,
+) -> Result<DocumentVersionDto, String> {
+    let versions_dir = state.data_dir.join("versions");
+    std::fs::create_dir_all(&versions_dir).map_err(|e| e.to_string())?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let snapshot_path = versions_dir.join(format!("{document_id}-{timestamp}.pdf"));
+    let snapshot_path_str = snapshot_path.to_str().ok_or("snapshot path is not valid UTF-8")?;
+
+    crate::commands::pdf::export_document_flattened_pdf(&state, &document_id, snapshot_path_str)?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    document::create_version(&conn, &document_id, snapshot_path_str, created_by.as_deref())
+        .map(Into::into)
+        .map_err(|e| e.to_string())
+}

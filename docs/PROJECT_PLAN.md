@@ -538,6 +538,35 @@ Phase 0 starts until the table above is clear.
       is still Naveen's check to run. Also unverified: the macOS/Windows
       keychain backends (no such machine available in this environment) —
       only the Linux path has been exercised against a real OS keychain.
+  - **RFI-03 drawing revision tracking (2026-09-13)**: the registry row's
+    own note ("Overlaps DocumentVersion") turned out to be exactly right —
+    `document::create_version`/`list_versions` (DOC-02) already had all
+    the domain logic and were IPC-wired, just with no frontend UI and no
+    way to produce the snapshot file `create_version` needs (it only
+    records a `file_snapshot_path` someone else already wrote). New
+    `save_document_revision` command does both steps as one user action:
+    writes a flattened snapshot (reusing `export_document_flattened_pdf`
+    a fourth time now — REL-01's autosave and EXPORT-03's handoff package
+    were the first two reuses, this is the third call site) to
+    `data_dir/versions/`, then calls `create_version` with that path. "Open
+    a past revision" needed no new backend command at all: the frontend
+    already has `file_snapshot_path` from `list_document_versions`, and
+    `@tauri-apps/plugin-opener` (already a dependency, already registered
+    on the Rust side for `opener:default` capability) hands that path
+    straight to the OS's default PDF viewer via `openPath`.
+    - Verified: `cargo check -p app` — clean. No new domain crate or
+      migration — nothing new to unit-test in isolation, since this is
+      pure composition of `document::create_version` (already covered by
+      `cargo test -p document`) and `export::export_flattened_pdf`
+      (already covered by `cargo test -p export`/`-p pdf_core`). `npm run
+      build` — clean, no type errors (21 modules now, up from 20, for the
+      new `plugin-opener` import). **NOT verified**: same live-IPC gap as
+      every feature so far — actually saving a revision and then opening
+      it in a real PDF viewer through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run; this is also the first
+      feature depending on the `opener:default` Tauri capability actually
+      permitting an arbitrary local file path (not just a URL) to be
+      opened, which hasn't been exercised at all yet.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
