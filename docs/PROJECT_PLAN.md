@@ -153,6 +153,32 @@ Phase 0 starts until the table above is clear.
       this environment still can't drive (same gap noted just above).
       Naveen exercising the canvas for real (`npm run tauri dev`) is the
       next real check, same as the outstanding IPC-bridge verification.
+  - **Select/move/resize added (2026-09-13)**: closed the gap this pass's
+    own note called out ("select/move/resize aren't built yet"). New
+    `select` mode on `PdfCanvas`: click hit-tests existing markups in page
+    space (`hitTest` — segment-distance for Line/Arrow, bounding-box for
+    Rectangle/Cloud, a padded box for Text) and highlights the topmost
+    unhidden match with a dashed selection box; dragging from inside a
+    selected, unlocked shape translates every point by the drag delta
+    (`moveState`); dragging one of its `resizeHandles` — the shape's own
+    stored points for Rectangle/Line/Arrow, none for Cloud/Text (move-only,
+    deliberately not attempting multi-point cloud editing this pass) —
+    rewrites that one point (`resizeState`). Both paths render a live
+    preview via `livePoints` and commit through the existing
+    `update_markup_geometry` IPC command (no backend change needed — it
+    already accepted arbitrary geometry) only on mouse-up, and only if the
+    geometry actually changed, then reload from `list_markups_by_page` so
+    the committed state is always what's shown. Locked markups can be
+    selected (to see they exist) but not moved or resized, matching what
+    `locked` is supposed to mean. No `rstar`/`SpatialIndex` wiring yet —
+    same call as the canvas's first pass: a page's markup count doesn't
+    yet justify it, plain O(n) hit-testing is fine here.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. **NOT
+      verified**: same live-IPC gap as every canvas interaction so far —
+      actually selecting/dragging a real markup through a signed-in
+      `npm run tauri dev` session is still Naveen's check to run, not
+      something this environment can drive.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

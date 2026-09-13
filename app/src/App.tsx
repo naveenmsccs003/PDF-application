@@ -87,9 +87,10 @@ export default function App() {
       <p className="subtitle">
         Working UI over the real IPC layer (not mockups) — every action here calls into
         the Rust domain crates via Tauri commands. The page view renders the actual PDF
-        and supports click-to-draw markup (rectangle/line/arrow/cloud/text); everything
-        else (projects, measurement, takeoff) is still a functional control panel rather
-        than a polished editor. Zoom/pan and shape select/move/resize aren't built yet.
+        and supports click-to-draw markup (rectangle/line/arrow/cloud/text) plus
+        select/move/resize on existing shapes; everything else (projects, measurement,
+        takeoff) is still a functional control panel rather than a polished editor.
+        Zoom/pan isn't built yet.
       </p>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
@@ -377,6 +378,48 @@ function minPointsFor(type: MarkupType): number {
   return 2;
 }
 
+/** Smallest axis-aligned box containing every point, in page space. */
+function boundingBox(points: Point[]): { minX: number; minY: number; maxX: number; maxY: number } {
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+}
+
+/** Point-in-shape hit test in page space, generous enough for thin lines/text. */
+function hitTest(m: MarkupDto, p: Point, tolerancePageUnits: number): boolean {
+  const pts = m.geometry.points;
+  if (m.markup_type === "Text") {
+    const [tx, ty] = pts[0];
+    return Math.abs(p[0] - tx) < tolerancePageUnits * 6 && Math.abs(p[1] - ty) < tolerancePageUnits * 3;
+  }
+  if (m.markup_type === "Line" || m.markup_type === "Arrow") {
+    const [[x1, y1], [x2, y2]] = pts;
+    const len2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - x1) * (x2 - x1) + (p[1] - y1) * (y2 - y1)) / len2));
+    const cx = x1 + t * (x2 - x1);
+    const cy = y1 + t * (y2 - y1);
+    return Math.hypot(p[0] - cx, p[1] - cy) < tolerancePageUnits;
+  }
+  // Rectangle/Cloud: bounding-box test is good enough at this pass's fidelity.
+  const box = boundingBox(pts);
+  return p[0] >= box.minX - tolerancePageUnits && p[0] <= box.maxX + tolerancePageUnits && p[1] >= box.minY - tolerancePageUnits && p[1] <= box.maxY + tolerancePageUnits;
+}
+
+/**
+ * Points a shape exposes as draggable resize handles, in page space — index
+ * matches `geometry.points` so a drag can write straight back to one entry.
+ * Rectangle is stored as two diagonal corners (same pair the drag-to-draw
+ * gesture produces), so dragging either one resizes it the same way drawing
+ * did. Cloud/Text return none: multi-point cloud editing and text have no
+ * single-corner resize that makes sense at this pass's scope — move only.
+ */
+function resizeHandles(m: MarkupDto): Point[] {
+  if (m.markup_type === "Line" || m.markup_type === "Arrow" || m.markup_type === "Rectangle") {
+    return m.geometry.points;
+  }
+  return [];
+}
+
 function PdfCanvas({
   page,
   markups,
@@ -398,6 +441,10 @@ function PdfCanvas({
   const [cloudPoints, setCloudPoints] = useState<Point[]>([]);
   const [pendingTextPoint, setPendingTextPoint] = useState<Point | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [moveState, setMoveState] = useState<{ id: string; originPoints: Point[]; startPointer: Point } | null>(null);
+  const [resizeState, setResizeState] = useState<{ id: string; pointIndex: number } | null>(null);
+  const [livePoints, setLivePoints] = useState<Point[] | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   const renderedHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
@@ -433,9 +480,45 @@ function PdfCanvas({
       onCreated();
     });
 
+  const commitGeometry = (id: string, markupType: MarkupType, points: Point[]) =>
+    runAction(async () => {
+      await api.updateMarkupGeometry(id, markupType, { points });
+      onCreated();
+    });
+
+  const selectTool = (t: DrawTool) => {
+    setTool(t);
+    setCloudPoints([]);
+    setPendingTextPoint(null);
+    setSelectedId(null);
+    setMoveState(null);
+    setResizeState(null);
+    setLivePoints(null);
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (tool === "select") return;
     const p = toPagePoint(e.clientX, e.clientY);
+    if (tool === "select") {
+      const tolerance = 8 * scale;
+      const selected = markups.find((m) => m.id === selectedId);
+      if (selected && !selected.locked) {
+        const handleIdx = resizeHandles(selected).findIndex(
+          (h) => Math.hypot(h[0] - p[0], h[1] - p[1]) < tolerance * 1.5,
+        );
+        if (handleIdx >= 0) {
+          setResizeState({ id: selected.id, pointIndex: handleIdx });
+          setLivePoints(selected.geometry.points);
+          return;
+        }
+      }
+      const hit = [...markups].reverse().find((m) => !m.hidden && hitTest(m, p, tolerance));
+      setSelectedId(hit ? hit.id : null);
+      if (hit && !hit.locked) {
+        setMoveState({ id: hit.id, originPoints: hit.geometry.points, startPointer: p });
+        setLivePoints(hit.geometry.points);
+      }
+      return;
+    }
     if (tool === "Text") {
       setPendingTextPoint(p);
       setPendingTextValue("");
@@ -450,11 +533,44 @@ function PdfCanvas({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (moveState) {
+      const p = toPagePoint(e.clientX, e.clientY);
+      const dx = p[0] - moveState.startPointer[0];
+      const dy = p[1] - moveState.startPointer[1];
+      setLivePoints(moveState.originPoints.map(([x, y]) => [x + dx, y + dy] as Point));
+      return;
+    }
+    if (resizeState) {
+      const p = toPagePoint(e.clientX, e.clientY);
+      setLivePoints((prev) => {
+        if (!prev) return prev;
+        const next = [...prev];
+        next[resizeState.pointIndex] = p;
+        return next;
+      });
+      return;
+    }
     if (!dragStart) return;
     setDragCurrent(toPagePoint(e.clientX, e.clientY));
   };
 
   const handleMouseUp = () => {
+    if (moveState) {
+      const markupType = markups.find((m) => m.id === moveState.id)?.markup_type;
+      const changed = livePoints && JSON.stringify(livePoints) !== JSON.stringify(moveState.originPoints);
+      if (markupType && changed && livePoints) commitGeometry(moveState.id, markupType, livePoints);
+      setMoveState(null);
+      setLivePoints(null);
+      return;
+    }
+    if (resizeState) {
+      const original = markups.find((m) => m.id === resizeState.id);
+      const changed = original && livePoints && JSON.stringify(livePoints) !== JSON.stringify(original.geometry.points);
+      if (original && changed && livePoints) commitGeometry(resizeState.id, original.markup_type, livePoints);
+      setResizeState(null);
+      setLivePoints(null);
+      return;
+    }
     if (!dragStart || !dragCurrent) return;
     commitShape(tool as MarkupType, [dragStart, dragCurrent]);
     setDragStart(null);
@@ -478,14 +594,7 @@ function PdfCanvas({
   return (
     <div>
       <div className="row">
-        <select
-          value={tool}
-          onChange={(e) => {
-            setTool(e.target.value as DrawTool);
-            setCloudPoints([]);
-            setPendingTextPoint(null);
-          }}
-        >
+        <select value={tool} onChange={(e) => selectTool(e.target.value as DrawTool)}>
           <option value="select">Select (no draw)</option>
           <option value="Rectangle">Draw: Rectangle</option>
           <option value="Line">Draw: Line</option>
@@ -513,7 +622,7 @@ function PdfCanvas({
           width={RENDER_WIDTH}
           height={renderedHeight}
           className="pdf-canvas-overlay"
-          style={{ cursor: tool === "select" ? "default" : "crosshair" }}
+          style={{ cursor: moveState ? "grabbing" : resizeState ? "nwse-resize" : tool === "select" ? "default" : "crosshair" }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -525,9 +634,41 @@ function PdfCanvas({
           </defs>
           {markups
             .filter((m) => !m.hidden)
-            .map((m) => (
-              <MarkupShape key={m.id} markup={m} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />
-            ))}
+            .map((m) => {
+              const dragging = (moveState?.id === m.id || resizeState?.id === m.id) && livePoints;
+              const shown = dragging ? { ...m, geometry: { ...m.geometry, points: livePoints! } } : m;
+              return <MarkupShape key={m.id} markup={shown} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />;
+            })}
+          {tool === "select" &&
+            selectedId &&
+            (() => {
+              const sel = markups.find((m) => m.id === selectedId);
+              if (!sel) return null;
+              const dragging = (moveState?.id === sel.id || resizeState?.id === sel.id) && livePoints;
+              const points = dragging ? livePoints! : sel.geometry.points;
+              const box = boundingBox(points);
+              const [bx1, by1] = toPixel([box.minX, box.minY]);
+              const [bx2, by2] = toPixel([box.maxX, box.maxY]);
+              const handles = resizeHandles({ ...sel, geometry: { ...sel.geometry, points } });
+              return (
+                <g pointerEvents="none">
+                  <rect
+                    x={Math.min(bx1, bx2) - 4}
+                    y={Math.min(by1, by2) - 4}
+                    width={Math.abs(bx2 - bx1) + 8}
+                    height={Math.abs(by2 - by1) + 8}
+                    fill="none"
+                    stroke="#2196f3"
+                    strokeWidth={1}
+                    strokeDasharray="3 2"
+                  />
+                  {handles.map((h, i) => {
+                    const [hx, hy] = toPixel(h);
+                    return <circle key={i} cx={hx} cy={hy} r={5} fill="#2196f3" />;
+                  })}
+                </g>
+              );
+            })()}
           {isDragTool && dragStart && dragCurrent && (
             <PreviewShape type={tool as MarkupType} start={dragStart} current={dragCurrent} toPixel={toPixel} color={color} />
           )}
