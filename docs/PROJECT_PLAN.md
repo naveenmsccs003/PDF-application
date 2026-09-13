@@ -125,6 +125,34 @@ Phase 0 starts until the table above is clear.
       (`cd app && npm run tauri dev`, outside any snap/sandboxed
       environment) remains the real end-to-end check, now for IPC + native
       window behavior specifically rather than "does it render at all."
+  - **PDF markup canvas added (2026-09-13)**: `app/src/App.tsx` no longer
+    creates markup via a raw "points, e.g. 0,0 2,1" text field — `PdfCanvas`
+    (new component in the same file) renders the actual page image (reused
+    `render_page_thumbnail` at `RENDER_WIDTH = 900` instead of thumbnail
+    size — no backend change needed, that command already just calls
+    `render_page_to_png` under a different name) with an absolutely
+    positioned SVG overlay for click-to-draw Rectangle/Line/Arrow (drag),
+    Cloud (click points, then "Finish cloud"), and Text (click, type inline,
+    Enter to commit) — all five `MarkupType`s. Existing markups render back
+    onto the overlay from `list_markups_by_page`, respecting `hidden`.
+    Coordinates: overlay pixel → page-space is a uniform `page.width /
+    RENDER_WIDTH` scale (image and page share aspect ratio since
+    `pdf_core` renders proportionally), y-axis stays image-top-down rather
+    than PDF's native bottom-up — an internal convention, not yet meaningful
+    outside this app since nothing exports these coordinates through a real
+    PDF round-trip yet. Measurement (calibrate/length/count) and the
+    lock/hide/delete/comments list were deliberately left as-is — this pass
+    is scoped to markup creation via canvas, not select/move/resize (no
+    spatial-index wiring yet, matches the still-open item from Phase 3's
+    "Markup, continued" entry above) or a measurement canvas.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      Headless-Chrome screenshot re-confirmed the sign-in screen still
+      renders with no regression. **NOT verified**: actually drawing a
+      shape and seeing it round-trip through a live `AppState` — that
+      needs a signed-in session against a real Tauri IPC bridge, which
+      this environment still can't drive (same gap noted just above).
+      Naveen exercising the canvas for real (`npm run tauri dev`) is the
+      next real check, same as the outstanding IPC-bridge verification.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

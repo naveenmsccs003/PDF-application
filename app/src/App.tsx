@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import type {
@@ -86,9 +86,10 @@ export default function App() {
       <h1>MDS Rebar — Backend Control Panel</h1>
       <p className="subtitle">
         Working UI over the real IPC layer (not mockups) — every action here calls into
-        the Rust domain crates via Tauri commands. This is a functional control panel for
-        exercising the backend, not the eventual PDF markup canvas (that needs
-        rendering/zoom/pan UI work not done yet).
+        the Rust domain crates via Tauri commands. The page view renders the actual PDF
+        and supports click-to-draw markup (rectangle/line/arrow/cloud/text); everything
+        else (projects, measurement, takeoff) is still a functional control panel rather
+        than a polished editor. Zoom/pan and shape select/move/resize aren't built yet.
       </p>
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
@@ -356,6 +357,300 @@ function DocumentsPanel({
 }
 
 // ---------------------------------------------------------------------------
+// PDF page canvas — click-to-draw markup over the real rendered page
+// (VIEW-01/02, MARK-01–04). Page-space coordinates are pixels-at-RENDER_WIDTH
+// scaled by page.width/RENDER_WIDTH, so they stay in the same "page unit"
+// space the manual measurement inputs below already use (page.width/height,
+// as reported by PageDto, are PDF points) — consistent within this app even
+// though the y-axis here is image-top-down rather than PDF's native
+// bottom-up, since nothing yet round-trips these coordinates through a real
+// PDF export.
+// ---------------------------------------------------------------------------
+
+const RENDER_WIDTH = 900;
+
+type DrawTool = "select" | MarkupType;
+
+function minPointsFor(type: MarkupType): number {
+  if (type === "Text") return 1;
+  if (type === "Cloud") return 3;
+  return 2;
+}
+
+function PdfCanvas({
+  page,
+  markups,
+  user,
+  onCreated,
+  runAction,
+}: {
+  page: PageDto;
+  markups: MarkupDto[];
+  user: UserDto;
+  onCreated: () => void;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [imageUri, setImageUri] = useState<string | null>(null);
+  const [tool, setTool] = useState<DrawTool>("select");
+  const [color, setColor] = useState("#e53935");
+  const [dragStart, setDragStart] = useState<Point | null>(null);
+  const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
+  const [cloudPoints, setCloudPoints] = useState<Point[]>([]);
+  const [pendingTextPoint, setPendingTextPoint] = useState<Point | null>(null);
+  const [pendingTextValue, setPendingTextValue] = useState("");
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const renderedHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
+  const scale = page.width > 0 ? page.width / RENDER_WIDTH : 1;
+
+  useEffect(() => {
+    let cancelled = false;
+    setImageUri(null);
+    api
+      .renderPageThumbnail(page.document_id, page.page_number, RENDER_WIDTH)
+      .then((uri) => {
+        if (!cancelled) setImageUri(uri);
+      })
+      .catch(() => {
+        /* PDF engine unavailable this session — canvas stays blank, list view still works */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page.id, page.document_id, page.page_number]);
+
+  const toPagePoint = (clientX: number, clientY: number): Point => {
+    const rect = svgRef.current!.getBoundingClientRect();
+    return [(clientX - rect.left) * scale, (clientY - rect.top) * scale];
+  };
+  const toPixel = ([x, y]: Point): Point => [x / scale, y / scale];
+
+  const commitShape = (type: MarkupType, points: Point[], text: string | null = null) =>
+    runAction(async () => {
+      if (points.length < minPointsFor(type)) return;
+      const style = { color, stroke_width: type === "Text" ? null : 2, text };
+      await api.createMarkup(page.id, type, { points }, style, user.id);
+      onCreated();
+    });
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (tool === "select") return;
+    const p = toPagePoint(e.clientX, e.clientY);
+    if (tool === "Text") {
+      setPendingTextPoint(p);
+      setPendingTextValue("");
+      return;
+    }
+    if (tool === "Cloud") {
+      setCloudPoints((prev) => [...prev, p]);
+      return;
+    }
+    setDragStart(p);
+    setDragCurrent(p);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!dragStart) return;
+    setDragCurrent(toPagePoint(e.clientX, e.clientY));
+  };
+
+  const handleMouseUp = () => {
+    if (!dragStart || !dragCurrent) return;
+    commitShape(tool as MarkupType, [dragStart, dragCurrent]);
+    setDragStart(null);
+    setDragCurrent(null);
+  };
+
+  const finishCloud = () => {
+    if (cloudPoints.length >= 3) commitShape("Cloud", cloudPoints);
+    setCloudPoints([]);
+  };
+
+  const commitPendingText = () => {
+    if (pendingTextPoint && pendingTextValue.trim()) {
+      commitShape("Text", [pendingTextPoint], pendingTextValue.trim());
+    }
+    setPendingTextPoint(null);
+  };
+
+  const isDragTool = tool !== "select" && tool !== "Cloud" && tool !== "Text";
+
+  return (
+    <div>
+      <div className="row">
+        <select
+          value={tool}
+          onChange={(e) => {
+            setTool(e.target.value as DrawTool);
+            setCloudPoints([]);
+            setPendingTextPoint(null);
+          }}
+        >
+          <option value="select">Select (no draw)</option>
+          <option value="Rectangle">Draw: Rectangle</option>
+          <option value="Line">Draw: Line</option>
+          <option value="Arrow">Draw: Arrow</option>
+          <option value="Cloud">Draw: Cloud (click points, then Finish)</option>
+          <option value="Text">Draw: Text (click to place)</option>
+        </select>
+        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
+        {tool === "Cloud" && (
+          <button onClick={finishCloud} disabled={cloudPoints.length < 3}>
+            Finish cloud ({cloudPoints.length} pts)
+          </button>
+        )}
+      </div>
+      <div className="pdf-canvas-wrap" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
+        {imageUri ? (
+          <img src={imageUri} width={RENDER_WIDTH} height={renderedHeight} draggable={false} alt={`page ${page.page_number}`} />
+        ) : (
+          <div className="thumb-placeholder" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
+            rendering…
+          </div>
+        )}
+        <svg
+          ref={svgRef}
+          width={RENDER_WIDTH}
+          height={renderedHeight}
+          className="pdf-canvas-overlay"
+          style={{ cursor: tool === "select" ? "default" : "crosshair" }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+        >
+          <defs>
+            <marker id={`arrowhead-${page.id}`} markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" />
+            </marker>
+          </defs>
+          {markups
+            .filter((m) => !m.hidden)
+            .map((m) => (
+              <MarkupShape key={m.id} markup={m} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />
+            ))}
+          {isDragTool && dragStart && dragCurrent && (
+            <PreviewShape type={tool as MarkupType} start={dragStart} current={dragCurrent} toPixel={toPixel} color={color} />
+          )}
+          {cloudPoints.length > 0 && (
+            <polyline
+              points={cloudPoints.map((p) => toPixel(p).join(",")).join(" ")}
+              fill="none"
+              stroke={color}
+              strokeWidth={2}
+              strokeDasharray="4 2"
+            />
+          )}
+        </svg>
+        {pendingTextPoint && (
+          <input
+            autoFocus
+            className="canvas-text-input"
+            style={{ left: toPixel(pendingTextPoint)[0], top: toPixel(pendingTextPoint)[1] }}
+            value={pendingTextValue}
+            onChange={(e) => setPendingTextValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitPendingText();
+              if (e.key === "Escape") setPendingTextPoint(null);
+            }}
+            onBlur={commitPendingText}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarkupShape({
+  markup,
+  toPixel,
+  arrowMarkerId,
+}: {
+  markup: MarkupDto;
+  toPixel: (p: Point) => Point;
+  arrowMarkerId: string;
+}) {
+  const pts = markup.geometry.points.map(toPixel);
+  const color = markup.style.color ?? "#e53935";
+  const strokeWidth = markup.style.stroke_width ?? 2;
+
+  switch (markup.markup_type) {
+    case "Rectangle": {
+      const [[x1, y1], [x2, y2]] = pts;
+      return (
+        <rect
+          x={Math.min(x1, x2)}
+          y={Math.min(y1, y2)}
+          width={Math.abs(x2 - x1)}
+          height={Math.abs(y2 - y1)}
+          fill="none"
+          stroke={color}
+          strokeWidth={strokeWidth}
+        />
+      );
+    }
+    case "Line":
+    case "Arrow": {
+      const [[x1, y1], [x2, y2]] = pts;
+      return (
+        <line
+          x1={x1}
+          y1={y1}
+          x2={x2}
+          y2={y2}
+          stroke={color}
+          strokeWidth={strokeWidth}
+          markerEnd={markup.markup_type === "Arrow" ? `url(#${arrowMarkerId})` : undefined}
+        />
+      );
+    }
+    case "Cloud":
+      return <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={`${color}22`} stroke={color} strokeWidth={strokeWidth} />;
+    case "Text": {
+      const [x, y] = pts[0] ?? [0, 0];
+      return (
+        <text x={x} y={y} fill={color} fontSize={14} fontFamily="inherit">
+          {markup.style.text || "(text)"}
+        </text>
+      );
+    }
+    default:
+      return null;
+  }
+}
+
+function PreviewShape({
+  type,
+  start,
+  current,
+  toPixel,
+  color,
+}: {
+  type: MarkupType;
+  start: Point;
+  current: Point;
+  toPixel: (p: Point) => Point;
+  color: string;
+}) {
+  const [x1, y1] = toPixel(start);
+  const [x2, y2] = toPixel(current);
+  if (type === "Rectangle") {
+    return (
+      <rect
+        x={Math.min(x1, x2)}
+        y={Math.min(y1, y2)}
+        width={Math.abs(x2 - x1)}
+        height={Math.abs(y2 - y1)}
+        fill="none"
+        stroke={color}
+        strokeWidth={2}
+        strokeDasharray="4 2"
+      />
+    );
+  }
+  return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={2} strokeDasharray="4 2" />;
+}
+
+// ---------------------------------------------------------------------------
 // Markup + Measurement, scoped to one page (MARK-*/MEAS-*)
 // ---------------------------------------------------------------------------
 
@@ -370,9 +665,6 @@ function PagePanel({
 }) {
   // -- markup --
   const [markups, setMarkups] = useState<MarkupDto[]>([]);
-  const [markupType, setMarkupType] = useState<MarkupType>("Rectangle");
-  const [pointsInput, setPointsInput] = useState("0,0 2,1");
-  const [colorInput, setColorInput] = useState("#ff0000");
   const [commentsByMarkup, setCommentsByMarkup] = useState<Record<string, MarkupCommentDto[]>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
 
@@ -382,13 +674,6 @@ function PagePanel({
     reloadMarkups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
-
-  const createMarkup = () =>
-    runAction(async () => {
-      const points = parsePoints(pointsInput);
-      await api.createMarkup(page.id, markupType, { points }, { color: colorInput, stroke_width: null, text: null }, user.id);
-      await reloadMarkups();
-    });
 
   const toggleLock = (m: MarkupDto) => runAction(async () => {
     await api.setMarkupLocked(m.id, !m.locked);
@@ -474,18 +759,7 @@ function PagePanel({
       <div className="two-col">
         <div>
           <h4>Markup (MARK-01–04/07/08)</h4>
-          <div className="row">
-            <select value={markupType} onChange={(e) => setMarkupType(e.target.value as MarkupType)}>
-              <option>Text</option>
-              <option>Rectangle</option>
-              <option>Cloud</option>
-              <option>Line</option>
-              <option>Arrow</option>
-            </select>
-            <input placeholder="points, e.g. 0,0 2,1" value={pointsInput} onChange={(e) => setPointsInput(e.target.value)} />
-            <input type="color" value={colorInput} onChange={(e) => setColorInput(e.target.value)} />
-            <button onClick={createMarkup}>Add markup</button>
-          </div>
+          <PdfCanvas page={page} markups={markups} user={user} onCreated={reloadMarkups} runAction={runAction} />
           <ul>
             {markups.map((m) => (
               <li key={m.id}>

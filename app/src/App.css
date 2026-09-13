@@ -168,6 +168,34 @@ li {
   font-size: 0.85em;
 }
 
+.pdf-canvas-wrap {
+  position: relative;
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  margin: 0.5rem 0;
+}
+
+.pdf-canvas-wrap img {
+  display: block;
+  user-select: none;
+}
+
+.pdf-canvas-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.canvas-text-input {
+  position: absolute;
+  transform: translate(-2px, -0.9em);
+  font-size: 14px;
+  padding: 0.1em 0.3em;
+  min-width: 4em;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f0f0f0;
@@ -196,6 +224,9 @@ li {
   }
   .csv-preview {
     background: #262626;
+    border-color: #444;
+  }
+  .pdf-canvas-wrap {
     border-color: #444;
   }
   .subtitle,
