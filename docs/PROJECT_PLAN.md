@@ -593,6 +593,74 @@ Phase 0 starts until the table above is clear.
       permits opening an arbitrary local file path in this app's current
       capability config — worth checking both in the same session, since
       a fix (if one's needed) would apply to both.
+  - **First real `npm run tauri dev` run, and a genuine bug it caught
+    (2026-09-13)**: every feature above this line had only ever been
+    verified via `cargo test`/`cargo check`/`npm run build` — every "NOT
+    verified" note calling out the live-IPC gap was real. This pass
+    actually ran the app for the first time this session.
+    - The first attempt failed immediately: `symbol lookup error: /snap/
+      core20/current/lib/x86_64-linux-gnu/libpthread.so.0: undefined
+      symbol: __libc_pthread_init, version GLIBC_PRIVATE`. Traced to this
+      shell's environment being a VS Code-*snap* integrated terminal
+      (`code` itself installed as a snap — confirmed via `env | grep -i
+      snap` showing `GTK_PATH`/`GIO_MODULE_DIR`/`LOCPATH` etc. all
+      pointing into `/snap/code/255/...`), which leaks snap library search
+      paths into child processes and made the dynamically-linked `app`
+      binary resolve `libpthread` from `/snap/core20` (an older/different
+      glibc ABI) instead of the system's own. Confirmed by re-running the
+      exact same binary through `env -i` with only `PATH`/`HOME`/
+      `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`/
+      `DBUS_SESSION_BUS_ADDRESS` — it started cleanly and stayed running.
+      **This is an environment artifact of this dev session's terminal,
+      not an app bug** — worth knowing about if Naveen ever launches
+      `npm run tauri dev` from a VS Code (snap) integrated terminal
+      himself, but a normal terminal shouldn't hit it.
+    - With that worked around, the app actually started and stayed
+      running (Vite dev server up, `cargo run` succeeded, process alive
+      with no error output). Since this session has no way to interact
+      with a native GTK/Wayland window (`claude-in-chrome` only reaches
+      Chrome tabs; no screenshot tool was available — `xwd` failed with
+      `BadMatch` since this is a real Wayland session, and no
+      `grim`/ImageMagick/`wmctrl` were installed either), a full UI
+      click-through still wasn't possible from here — but the app's own
+      on-disk state was inspectable directly.
+    - **That inspection caught a real, serious bug**: this machine
+      already had a local database at `~/.local/share/com.mdsrebar.app/
+      mds_rebar.sqlite`, created earlier the same day (`10:58` per its
+      mtime, hours before RFI-01/02 was built). `PRAGMA user_version` was
+      `1`, and the `rfi` table was completely absent. Root cause: `rfi`
+      had been added by editing `0001_initial.sql` directly rather than
+      as a new migration (reasoning at the time: "no deployed instances
+      yet, no history to preserve" — see the RFI-01/02 entry above). That
+      reasoning was wrong: this local database *was* a deployed instance,
+      already at version 1 before `rfi` existed, and `rusqlite_migration`
+      tracks progress by `user_version`, not by diffing SQL text — it
+      never re-runs a migration index it already recorded as applied, no
+      matter what gets added to that file's content afterward. Every
+      `cargo test` in this session passed anyway because they all migrate
+      a fresh `:memory:` database, which naturally never hits this.
+    - Fixed properly, not just patched around: added `0002_add_rfi.sql`
+      (`CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS`, safe
+      whether or not 0001 already created `rfi`) and registered it in
+      `mds_db::migrations()`. Added a regression test
+      (`to_latest_adds_rfi_to_a_database_stuck_at_version_1`) that
+      simulates the exact stuck-at-version-1 state (migrate fresh, drop
+      `rfi`, rewind `user_version` to 1 by hand) and confirms `to_latest()`
+      repairs it. Repaired the actual affected local database directly
+      (via a throwaway `cargo run --example`, since deleted) and confirmed
+      by reopening it with Python's `sqlite3`: `user_version` is now `2`
+      and `rfi` exists. Documented in `docs/database/README.md` under
+      "Migrations are additive from here on" as a standing rule for every
+      future schema change.
+    - Verified: `cargo test -p mds_db` — 4/4 passing (the pre-existing 3
+      plus the new regression test). The real local database, directly
+      inspected before and after: `rfi` absent → `user_version` rewound
+      to 1 → migrated → `rfi` present, `user_version = 2`. **Still NOT
+      verified**: actual UI interaction (drawing a markup, filing an RFI,
+      etc.) — this pass closed the "does it even start, and is the schema
+      actually right" gap, which turned out to hide a real bug, but a
+      full click-through still needs either a screenshot-capable tool in
+      this environment or Naveen doing it himself.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

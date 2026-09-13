@@ -10,7 +10,10 @@ pub enum DbError {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../migrations/0001_initial.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/0001_initial.sql")),
+        M::up(include_str!("../migrations/0002_add_rfi.sql")),
+    ])
 }
 
 /// Opens a SQLite connection at `path`, enables foreign key enforcement and
@@ -68,6 +71,39 @@ mod tests {
                 "expected table `{expected}` to exist, got tables: {tables:?}"
             );
         }
+    }
+
+    /// Regression test for a real bug found by actually running the app on
+    /// a real machine (not `:memory:`): its local database had been
+    /// created back when `rfi` lived only in-text inside
+    /// `0001_initial.sql`, never as its own migration. `rusqlite_migration`
+    /// tracks progress as `PRAGMA user_version`, not by diffing SQL text —
+    /// so that database was permanently stuck at `user_version = 1` with
+    /// no `rfi` table at all, no matter what got added to 0001's file
+    /// content afterward, since a migration index it already recorded as
+    /// applied is never re-run.
+    ///
+    /// Reproduces the actual repair operation rather than replaying
+    /// history through a frozen copy of the old (pre-`rfi`) 0001 text,
+    /// which would silently stop testing anything real the moment 0001's
+    /// content changes again: migrate a fresh database to today's full
+    /// schema, then simulate "already at version 1, missing `rfi`" by
+    /// dropping the table and rewinding `user_version` by hand, and
+    /// confirm `to_latest()` puts it back via migration 2.
+    #[test]
+    fn to_latest_adds_rfi_to_a_database_stuck_at_version_1() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        assert!(table_names(&conn).iter().any(|t| t == "rfi"));
+
+        conn.execute_batch("DROP TABLE rfi").unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        assert!(!table_names(&conn).iter().any(|t| t == "rfi"));
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        assert!(table_names(&conn).iter().any(|t| t == "rfi"));
     }
 
     #[test]
