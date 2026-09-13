@@ -3,6 +3,7 @@ mod dto;
 
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -28,6 +29,11 @@ pub struct AppState {
     /// `commands::markup`'s module doc for why this is scoped per page
     /// rather than per document or per user.
     markup_undo: Mutex<HashMap<String, markup::UndoStack>>,
+    /// REL-01/02: where `commands::recovery`'s autosave snapshots get
+    /// written (a `recovery/` subdirectory of this). Resolved once at
+    /// startup from Tauri's own app data dir, same place the SQLite file
+    /// lives.
+    data_dir: PathBuf,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -59,6 +65,7 @@ pub fn run() {
                 db: Mutex::new(conn),
                 pdf_engine,
                 markup_undo: Mutex::new(HashMap::new()),
+                data_dir,
             });
             Ok(())
         })
@@ -115,6 +122,10 @@ pub fn run() {
             commands::rfi::get_rfi,
             commands::rfi::list_rfis_for_document,
             commands::rfi::set_rfi_status,
+            commands::recovery::autosave_snapshot,
+            commands::recovery::list_recovery_snapshots,
+            commands::recovery::restore_recovery_snapshot,
+            commands::recovery::discard_recovery_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

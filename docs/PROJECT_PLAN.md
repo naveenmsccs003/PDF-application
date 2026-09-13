@@ -426,6 +426,49 @@ Phase 0 starts until the table above is clear.
       as every feature so far — actually picking a folder and confirming
       both files land in it through a signed-in `npm run tauri dev`
       session is still Naveen's check to run.
+  - **REL-01/02 autosave + crash recovery (2026-09-13)**: neither the
+    master list nor the build prompt spell out what "autosave"/"restore"
+    should mean once you notice something specific to this app's own
+    architecture: every Markup/Measurement/RFI mutation already writes
+    straight to SQLite the moment it's made (`create_markup` et al. persist
+    immediately, no in-memory "unsaved changes" buffer the way a
+    traditional document editor has one) — so there's no draft data at
+    risk of being lost to a crash the way "autosave" usually implies. The
+    thing that genuinely isn't durable is `markup::UndoStack` (in-memory
+    only, lost on restart) — but a rendered PDF snapshot can't reconstruct
+    that either. Given that, treated a "snapshot" here as a periodic
+    **flattened PDF copy** (reusing EXPORT-01 as-is: `export_document_
+    flattened_pdf`, already pulled out as a plain function for EXPORT-03,
+    called a third time here) rather than inventing a database-backup
+    mechanism nothing asked for. New `crates/recovery` crate around the
+    already-existing (from the original schema) `recovery_state` table:
+    `create`/`get`/`list_by_document` (newest first)/`delete`, plus
+    `prune_oldest` so autosave has a disk-bounding story from day one
+    instead of accumulating snapshots forever — kept the most recent 5 per
+    document. "Restore" (REL-02) deliberately does NOT touch any live
+    Markup/Measurement row: it copies the snapshot file to a user-chosen
+    path via a save dialog. Silently overwriting live data based on a
+    guessed definition of "restore" was judged the riskier choice than a
+    restore that's merely less powerful than it could be — this can be
+    revisited if Naveen wants true data rollback instead. `AppState`
+    gained a `data_dir` field (Tauri's app data dir, already resolved at
+    startup for the SQLite path) so `autosave_snapshot` knows where to
+    write its `recovery/` subfolder. Frontend: a `RecoveryPanel` alongside
+    `RfiPanel`/`TakeoffPanel`, autosaving on a 3-minute interval (silently
+    — a background timer shouldn't pop an error banner every 3 minutes if
+    `libpdfium.so` isn't present this session; that's still `runAction`'s
+    job for the explicit Restore/Discard buttons) plus a manual snapshot
+    list with Restore/Discard.
+    - Verified: `cargo test -p recovery` — 5/5 passing (create/get/list
+      round trip, newest-first ordering, `prune_oldest` keeps only the N
+      most recent, delete returns the deleted row, cascade delete on the
+      owning document). `cargo check -p recovery -p app` — clean. Full
+      workspace (`cargo test --workspace --exclude app`) — 100/100
+      passing, no regressions. `npm run build` — clean, no type errors.
+      **NOT verified**: same live-IPC gap as every feature so far —
+      actually watching an autosave tick land, then restoring/discarding a
+      real snapshot, through a signed-in `npm run tauri dev` session is
+      still Naveen's check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

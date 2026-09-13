@@ -267,6 +267,25 @@ impl From<rfi::Rfi> for RfiDto {
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct RecoverySnapshotDto {
+    pub id: String,
+    pub document_id: String,
+    pub snapshot_path: String,
+    pub created_at: String,
+}
+
+impl From<recovery::RecoverySnapshot> for RecoverySnapshotDto {
+    fn from(s: recovery::RecoverySnapshot) -> Self {
+        Self {
+            id: s.id,
+            document_id: s.document_id,
+            snapshot_path: s.snapshot_path,
+            created_at: s.created_at,
+        }
+    }
+}
+
 impl From<takeoff::TakeoffItem> for TakeoffItemDto {
     fn from(item: takeoff::TakeoffItem) -> Self {
         let total_cost = item.total_cost();

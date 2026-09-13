@@ -360,6 +360,8 @@ function DocumentsPanel({
           <TakeoffPanel document={selectedDocument} runAction={runAction} />
 
           <RfiPanel document={selectedDocument} pages={pages} user={user} runAction={runAction} />
+
+          <RecoveryPanel document={selectedDocument} runAction={runAction} />
         </div>
       )}
     </section>
@@ -1443,6 +1445,70 @@ function RfiPanel({
             </li>
           );
         })}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recovery (REL-01/02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+const AUTOSAVE_INTERVAL_MS = 3 * 60 * 1000;
+
+function RecoveryPanel({
+  document: doc,
+  runAction,
+}: {
+  document: DocumentDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [snapshots, setSnapshots] = useState<api.RecoverySnapshotDto[]>([]);
+
+  const reload = () => runAction(async () => setSnapshots(await api.listRecoverySnapshots(doc.id)));
+
+  useEffect(() => {
+    reload();
+    // A failed autosave tick (e.g. no libpdfium this session) shouldn't pop
+    // an error banner every 3 minutes — that's runAction's job for the
+    // explicit Restore/Discard actions below, not a background timer.
+    const tick = () => api.autosaveSnapshot(doc.id).then(reload).catch(() => {});
+    const interval = setInterval(tick, AUTOSAVE_INTERVAL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  const restore = (s: api.RecoverySnapshotDto) =>
+    runAction(async () => {
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        defaultPath: `recovered-${s.created_at.replace(/[:.]/g, "-")}.pdf`,
+      });
+      if (!outputPath) return;
+      await api.restoreRecoverySnapshot(s.id, outputPath);
+    });
+
+  const discard = (s: api.RecoverySnapshotDto) =>
+    runAction(async () => {
+      await api.discardRecoverySnapshot(s.id);
+      await reload();
+    });
+
+  return (
+    <div className="nested">
+      <h3>Recovery (REL-01/02)</h3>
+      <p className="muted">
+        Autosaves a flattened snapshot of this document every {AUTOSAVE_INTERVAL_MS / 60000} minutes while it's open.
+        Restoring gets you a copy of that snapshot file — it never changes any markup/measurement data, which is
+        already saved as you work.
+      </p>
+      <ul>
+        {snapshots.map((s) => (
+          <li key={s.id}>
+            {s.created_at} <button onClick={() => restore(s)}>Restore…</button>{" "}
+            <button onClick={() => discard(s)}>Discard</button>
+          </li>
+        ))}
       </ul>
     </div>
   );

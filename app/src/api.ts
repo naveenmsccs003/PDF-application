@@ -169,6 +169,26 @@ export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
 export const exportHandoffPackage = (documentId: string, outputDir: string) =>
   invoke<void>("export_handoff_package", { documentId, outputDir });
 
+// -- recovery (REL-01/02) --
+
+export interface RecoverySnapshotDto {
+  id: string;
+  document_id: string;
+  snapshot_path: string;
+  created_at: string;
+}
+
+export const autosaveSnapshot = (documentId: string) =>
+  invoke<RecoverySnapshotDto>("autosave_snapshot", { documentId });
+
+export const listRecoverySnapshots = (documentId: string) =>
+  invoke<RecoverySnapshotDto[]>("list_recovery_snapshots", { documentId });
+
+export const restoreRecoverySnapshot = (id: string, outputPath: string) =>
+  invoke<void>("restore_recovery_snapshot", { id, outputPath });
+
+export const discardRecoverySnapshot = (id: string) => invoke<void>("discard_recovery_snapshot", { id });
+
 export const listDocumentsForProject = (projectId: string) =>
   invoke<DocumentDto[]>("list_documents_for_project", { projectId });
 

@@ -34,6 +34,7 @@ measurement = { path = "../../crates/measurement" }
 takeoff = { path = "../../crates/takeoff" }
 rfi = { path = "../../crates/rfi" }
 export = { path = "../../crates/export" }
+recovery = { path = "../../crates/recovery" }
 tauri-plugin-dialog = "2"
 
 
