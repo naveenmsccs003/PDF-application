@@ -214,7 +214,7 @@ function ProjectsPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Documents (DOC-01/02/04/05)
+// Documents (DOC-01/03/04/05)
 // ---------------------------------------------------------------------------
 
 function DocumentsPanel({
@@ -287,10 +287,11 @@ function DocumentsPanel({
 
   const selectedDocument = documents.find((d) => d.id === selectedDocumentId) ?? null;
   const selectedPage = pages.find((p) => p.id === selectedPageId) ?? null;
+  const closeDocument = () => setSelectedDocumentId(null);
 
   return (
     <section className="card">
-      <h2>Documents (DOC-01/04/05)</h2>
+      <h2>Documents (DOC-01/03/04/05)</h2>
       <div className="row">
         <select value={selectedDocumentId ?? ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)}>
           <option value="">— select a document —</option>
@@ -300,6 +301,7 @@ function DocumentsPanel({
             </option>
           ))}
         </select>
+        {selectedDocument && <button onClick={closeDocument}>Close document</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
         <button onClick={importPdf}>Import PDF…</button>
       </div>

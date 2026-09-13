@@ -293,6 +293,21 @@ Phase 0 starts until the table above is clear.
       interaction so far — actually zooming/panning a real rendered page
       through a signed-in `npm run tauri dev` session is still Naveen's
       check to run.
+  - **DOC-03 close document (2026-09-13)**: the registry row itself already
+    called this "not domain logic — dropping a `PdfDocument` value; nothing
+    to test in isolation," so there was no backend gap to close, only a
+    missing UI affordance. Added a "Close document" button next to the
+    document picker in `DocumentsPanel`, shown only while a document is
+    selected; it just resets `selectedDocumentId` to `null`; the existing
+    `useEffect` keyed on that state already clears `pages`/`thumbnails`/
+    `selectedPageId` back to the document-picker view. Nothing persisted or
+    deleted — this is "stop viewing this document," not "delete" (that's
+    not a listed feature at all; DOC-01 import is the only lifecycle op
+    besides this one).
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors. No
+      Rust changes. **NOT verified**: same live-IPC gap as everything
+      else — clicking Close and confirming the picker resets through a
+      signed-in `npm run tauri dev` session is still Naveen's check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
