@@ -77,6 +77,7 @@ pub fn run() {
             commands::pdf::set_document_pdf_password,
             commands::pdf::clear_document_pdf_password,
             commands::export::export_handoff_package,
+            commands::export::print_document,
             commands::project::create_user,
             commands::project::get_user_by_email,
             commands::project::create_project,

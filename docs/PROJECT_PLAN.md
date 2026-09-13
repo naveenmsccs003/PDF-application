@@ -567,6 +567,32 @@ Phase 0 starts until the table above is clear.
       feature depending on the `opener:default` Tauri capability actually
       permitting an arbitrary local file path (not just a URL) to be
       opened, which hasn't been exercised at all yet.
+  - **EXPORT-02 print (2026-09-13)**: the last row in the registry with a
+    real design question left ("Print" could mean a native in-app print
+    dialog, a webview `window.print()`, or handing a file to something
+    else). Ruled out a native print dialog — nothing in this codebase
+    talks to platform print APIs, and building that from scratch for one
+    feature this late wasn't justified. Ruled out `window.print()` too:
+    the webview never renders the drawing at print quality — the canvas is
+    a markup-*editing* surface (an `<img>` thumbnail plus an SVG overlay
+    for interaction), not a print-ready page. Landed on the same move as
+    RFI-03's "Open…": produce a fresh flattened snapshot (current markups
+    included, `export_document_flattened_pdf` again — the fourth call
+    site now, after REL-01/EXPORT-03/RFI-03) written to the system temp
+    directory rather than `data_dir` (a print snapshot is disposable, not
+    a kept artifact like a `RecoveryState`/`DocumentVersion` one), then
+    hand it to the OS's default PDF viewer via `openPath` — that viewer's
+    own Print command is the actual print dialog (printer, page range,
+    paper size), which this app doesn't reimplement.
+    - Verified: `cargo check -p app` — clean. No new domain logic, no new
+      dependency — pure reuse of already-tested `export_document_
+      flattened_pdf` plus the `plugin-opener` wiring RFI-03 just added.
+      `npm run build` — clean, no type errors. **NOT verified**: same
+      live-IPC gap as every feature so far, plus the same open question
+      RFI-03 already flagged about whether `opener:default` actually
+      permits opening an arbitrary local file path in this app's current
+      capability config — worth checking both in the same session, since
+      a fix (if one's needed) would apply to both.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

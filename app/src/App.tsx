@@ -327,6 +327,13 @@ function DocumentsPanel({
       await api.exportHandoffPackage(selectedDocument.id, outputDir);
     });
 
+  const printDocument = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const path = await api.printDocument(selectedDocument.id);
+      await openPath(path);
+    });
+
   return (
     <section className="card">
       <h2>Documents (DOC-01/03/04/05)</h2>
@@ -342,6 +349,7 @@ function DocumentsPanel({
         {selectedDocument && <button onClick={closeDocument}>Close document</button>}
         {selectedDocument && <button onClick={exportFlattenedPdf}>Export flattened PDF…</button>}
         {selectedDocument && <button onClick={exportHandoffPackage}>Export handoff package…</button>}
+        {selectedDocument && <button onClick={printDocument}>Print…</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
         <input
           type="password"

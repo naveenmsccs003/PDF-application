@@ -177,6 +177,8 @@ export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
 export const exportHandoffPackage = (documentId: string, outputDir: string) =>
   invoke<void>("export_handoff_package", { documentId, outputDir });
 
+export const printDocument = (documentId: string) => invoke<string>("print_document", { documentId });
+
 // -- recovery (REL-01/02) --
 
 export interface RecoverySnapshotDto {

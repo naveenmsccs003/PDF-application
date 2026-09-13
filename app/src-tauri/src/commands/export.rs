@@ -43,3 +43,30 @@ pub fn export_handoff_package(
 
     Ok(())
 }
+
+/// EXPORT-02 (print): this app has no in-webview render of the actual
+/// drawing content good enough to print from directly (the canvas is a
+/// markup-editing surface, not a print-quality page render), and no
+/// native print dialog of its own — so "print" means producing an
+/// up-to-date flattened snapshot (current markups included, same as
+/// EXPORT-01) and handing it to the OS's default PDF viewer, the same way
+/// RFI-03's "Open…" on a past revision does. That viewer's own Print
+/// command is the actual print dialog (page range, printer, paper size),
+/// which this app doesn't need to reimplement. Writes to the system temp
+/// directory rather than `data_dir` — a print snapshot is disposable, not
+/// something meant to be kept like a `RecoveryState`/`DocumentVersion`
+/// snapshot. Returns the path so the frontend can hand it to
+/// `openPath` (`@tauri-apps/plugin-opener`) itself.
+#[tauri::command]
+pub fn print_document(state: tauri::State<AppState>, document_id: String) -> Result<String, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let print_path = std::env::temp_dir().join(format!("mds-rebar-print-{document_id}-{timestamp}.pdf"));
+    let print_path_str = print_path.to_str().ok_or("temp file path is not valid UTF-8")?;
+
+    export_document_flattened_pdf(&state, &document_id, print_path_str)?;
+
+    Ok(print_path_str.to_string())
+}
