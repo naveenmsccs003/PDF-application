@@ -166,6 +166,9 @@ export const renderPageThumbnail = (documentId: string, pageNumber: number, widt
 export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
   invoke<void>("export_flattened_pdf", { documentId, outputPath });
 
+export const exportHandoffPackage = (documentId: string, outputDir: string) =>
+  invoke<void>("export_handoff_package", { documentId, outputDir });
+
 export const listDocumentsForProject = (projectId: string) =>
   invoke<DocumentDto[]>("list_documents_for_project", { projectId });
 

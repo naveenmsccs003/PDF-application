@@ -1,4 +1,5 @@
 pub mod document;
+pub mod export;
 pub mod markup;
 pub mod measurement;
 pub mod pdf;

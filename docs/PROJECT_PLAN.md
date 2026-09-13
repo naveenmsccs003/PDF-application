@@ -404,7 +404,28 @@ Phase 0 starts until the table above is clear.
       real markups through a signed-in `npm run tauri dev` session, and
       opening the resulting file in another PDF viewer to confirm the
       markups are really burned in, is still Naveen's check to run. Not
-      built: EXPORT-02 (print) and EXPORT-03 (export/handoff package).
+      built: EXPORT-02 (print).
+  - **EXPORT-03 export/handoff package (2026-09-13)**: named directly by
+    Naveen as a priority, and unblocked once EXPORT-01 existed to bundle.
+    No new domain logic — this is pure composition of two things already
+    built and independently tested (EXPORT-01's `export_document_
+    flattened_pdf`, pulled out of the `export_flattened_pdf` command as a
+    plain function so this command can call it without a second IPC round
+    trip, and TAKE-05's existing `takeoff::export_csv`). Writes two sibling
+    files into a directory the user picks — `<title>-flattened.pdf` and
+    `<title>-takeoff.csv` — rather than a zip archive: simpler to produce,
+    and doesn't need a new dependency just to get one file out of the
+    bundle later. A real zip is easy to add if a real handoff workflow
+    turns out to need single-file delivery instead of a folder.
+    - Verified: `cargo check -p app` — clean (no new domain crate, so
+      nothing new to unit-test in isolation; the logic this command
+      exercises is already covered by `cargo test -p export`/`-p
+      takeoff`). Full workspace (`cargo test --workspace --exclude app`)
+      — 95/95 passing, unaffected (app crate isn't in that run). `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap
+      as every feature so far — actually picking a folder and confirming
+      both files land in it through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

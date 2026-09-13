@@ -302,6 +302,14 @@ function DocumentsPanel({
       await api.exportFlattenedPdf(selectedDocument.id, outputPath);
     });
 
+  const exportHandoffPackage = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const outputDir = await openFileDialog({ directory: true, multiple: false });
+      if (!outputDir || typeof outputDir !== "string") return;
+      await api.exportHandoffPackage(selectedDocument.id, outputDir);
+    });
+
   return (
     <section className="card">
       <h2>Documents (DOC-01/03/04/05)</h2>
@@ -316,6 +324,7 @@ function DocumentsPanel({
         </select>
         {selectedDocument && <button onClick={closeDocument}>Close document</button>}
         {selectedDocument && <button onClick={exportFlattenedPdf}>Export flattened PDF…</button>}
+        {selectedDocument && <button onClick={exportHandoffPackage}>Export handoff package…</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
         <button onClick={importPdf}>Import PDF…</button>
       </div>

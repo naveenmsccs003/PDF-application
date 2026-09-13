@@ -243,21 +243,19 @@ pub fn render_page_thumbnail(
     Ok(format!("data:image/png;base64,{encoded}"))
 }
 
-/// EXPORT-01: burns every page's non-hidden markups into a flattened copy
-/// of the document's PDF, saved to `output_path` (the frontend gets that
-/// path from a save dialog rather than this command inventing one, same
-/// division of responsibility as `import_pdf_document` taking an
-/// already-chosen `path` from an open dialog).
-#[tauri::command]
-pub fn export_flattened_pdf(
-    state: tauri::State<AppState>,
-    document_id: String,
-    output_path: String,
+/// Does the actual work behind `export_flattened_pdf` below — pulled out
+/// as a plain function (not a `#[tauri::command]`) so `commands::export`
+/// can also call it as one step of EXPORT-03's handoff package, without
+/// going through IPC a second time.
+pub(crate) fn export_document_flattened_pdf(
+    state: &AppState,
+    document_id: &str,
+    output_path: &str,
 ) -> Result<(), String> {
     let (file_path, pages) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let doc = document::get_document(&conn, &document_id).map_err(|e| e.to_string())?;
-        let pages = document::list_pages(&conn, &document_id).map_err(|e| e.to_string())?;
+        let doc = document::get_document(&conn, document_id).map_err(|e| e.to_string())?;
+        let pages = document::list_pages(&conn, document_id).map_err(|e| e.to_string())?;
         (doc.file_path, pages)
     };
 
@@ -271,5 +269,19 @@ pub fn export_flattened_pdf(
         }
     }
 
-    export_flattened(&state, &file_path, &output_path, markups_by_page_index)
+    export_flattened(state, &file_path, output_path, markups_by_page_index)
+}
+
+/// EXPORT-01: burns every page's non-hidden markups into a flattened copy
+/// of the document's PDF, saved to `output_path` (the frontend gets that
+/// path from a save dialog rather than this command inventing one, same
+/// division of responsibility as `import_pdf_document` taking an
+/// already-chosen `path` from an open dialog).
+#[tauri::command]
+pub fn export_flattened_pdf(
+    state: tauri::State<AppState>,
+    document_id: String,
+    output_path: String,
+) -> Result<(), String> {
+    export_document_flattened_pdf(&state, &document_id, &output_path)
 }
