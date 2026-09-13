@@ -1,0 +1,10 @@
+[package]
+name = "document"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+mds_db = { path = "../mds_db" }
+pdf_core = { path = "../pdf_core" }
+thiserror = "1"

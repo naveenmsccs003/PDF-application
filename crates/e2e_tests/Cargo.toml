@@ -1,0 +1,18 @@
+[package]
+name = "e2e_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+mds_db = { path = "../mds_db" }
+pdf_core = { path = "../pdf_core" }
+geometry = { path = "../geometry" }
+document = { path = "../document" }
+markup = { path = "../markup" }
+measurement = { path = "../measurement" }
+takeoff = { path = "../takeoff" }
+project = { path = "../project" }

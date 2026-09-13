@@ -1,0 +1,9 @@
+[package]
+name = "takeoff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+mds_db = { path = "../mds_db" }
+thiserror = "1"

@@ -1,0 +1,9 @@
+[package]
+name = "pdf_engine_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pdfium-render = { version = "0.8", features = ["image"] }
+image = { version = "0.25", features = ["png"] }
