@@ -340,21 +340,29 @@ function DocumentsPanel({
 }
 
 // ---------------------------------------------------------------------------
-// PDF page canvas — click-to-draw markup, select/move/resize, and scale
-// calibration/length/area/count measurement, all over the real rendered page
-// (VIEW-01/02, MARK-01–04, MEAS-01–07). Page-space coordinates are
-// pixels-at-RENDER_WIDTH scaled by page.width/RENDER_WIDTH, i.e. real PDF
-// points (page.width/height, as reported by PageDto, are PDF points) — so a
-// calibration/measurement taken here is in the same coordinate space as the
-// page itself, not an arbitrary unit. The y-axis stays image-top-down rather
-// than PDF's native bottom-up, since nothing yet round-trips these
-// coordinates through a real PDF export.
+// PDF page canvas — click-to-draw markup, select/move/resize, scale
+// calibration/length/area/count measurement, zoom, and pan, all over the
+// real rendered page (VIEW-01/02, MARK-01–04, MEAS-01–07). Page-space
+// coordinates are pixels-at-renderWidth (RENDER_WIDTH * zoom) scaled by
+// page.width/renderWidth, i.e. real PDF points (page.width/height, as
+// reported by PageDto, are PDF points) — so a calibration/measurement taken
+// here is in the same coordinate space as the page itself, not an arbitrary
+// unit, regardless of the current zoom level. The y-axis stays
+// image-top-down rather than PDF's native bottom-up, since nothing yet
+// round-trips these coordinates through a real PDF export. Zoom re-requests
+// the thumbnail at the zoomed pixel width (same `render_page_thumbnail` IPC
+// command, just a different `width`); pan is native scroll on a
+// fixed-size viewport, plus a dedicated "Pan" tool for click-drag scrolling.
 // ---------------------------------------------------------------------------
 
 const RENDER_WIDTH = 900;
+const VIEWPORT_MAX_HEIGHT = 700;
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 3;
+const ZOOM_STEP = 0.25;
 
 type MeasureTool = "Calibrate" | "Length" | "Area" | "Count";
-type DrawTool = "select" | MarkupType | MeasureTool;
+type DrawTool = "select" | "pan" | MarkupType | MeasureTool;
 type SelectRequest = { id: string; nonce: number };
 
 const MARKUP_DRAW_TOOLS: MarkupType[] = ["Rectangle", "Line", "Arrow", "Cloud", "Text"];
@@ -450,16 +458,28 @@ function PdfCanvas({
   const [moveState, setMoveState] = useState<{ id: string; originPoints: Point[]; startPointer: Point } | null>(null);
   const [resizeState, setResizeState] = useState<{ id: string; pointIndex: number } | null>(null);
   const [livePoints, setLivePoints] = useState<Point[] | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [panState, setPanState] = useState<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(
+    null,
+  );
   const svgRef = useRef<SVGSVGElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
 
-  const renderedHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
-  const scale = page.width > 0 ? page.width / RENDER_WIDTH : 1;
+  const baseHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
+  const viewportHeight = Math.min(baseHeight, VIEWPORT_MAX_HEIGHT);
+  const renderWidth = RENDER_WIDTH * zoom;
+  const renderedHeight = page.width > 0 ? (renderWidth * page.height) / page.width : renderWidth;
+  const scale = page.width > 0 ? page.width / renderWidth : 1;
+
+  const zoomIn = () => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(2)));
+  const zoomOut = () => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(2)));
+  const zoomReset = () => setZoom(1);
 
   useEffect(() => {
     let cancelled = false;
     setImageUri(null);
     api
-      .renderPageThumbnail(page.document_id, page.page_number, RENDER_WIDTH)
+      .renderPageThumbnail(page.document_id, page.page_number, Math.round(renderWidth))
       .then((uri) => {
         if (!cancelled) setImageUri(uri);
       })
@@ -469,7 +489,7 @@ function PdfCanvas({
     return () => {
       cancelled = true;
     };
-  }, [page.id, page.document_id, page.page_number]);
+  }, [page.id, page.document_id, page.page_number, renderWidth]);
 
   const updateSelection = (id: string | null) => {
     setSelectedId(id);
@@ -548,9 +568,16 @@ function PdfCanvas({
     setMoveState(null);
     setResizeState(null);
     setLivePoints(null);
+    setPanState(null);
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (tool === "pan") {
+      const el = viewportRef.current;
+      if (!el) return;
+      setPanState({ startX: e.clientX, startY: e.clientY, scrollLeft: el.scrollLeft, scrollTop: el.scrollTop });
+      return;
+    }
     const p = toPagePoint(e.clientX, e.clientY);
     if (tool === "select") {
       const tolerance = 8 * scale;
@@ -587,6 +614,14 @@ function PdfCanvas({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (panState) {
+      const el = viewportRef.current;
+      if (el) {
+        el.scrollLeft = panState.scrollLeft - (e.clientX - panState.startX);
+        el.scrollTop = panState.scrollTop - (e.clientY - panState.startY);
+      }
+      return;
+    }
     if (moveState) {
       const p = toPagePoint(e.clientX, e.clientY);
       const dx = p[0] - moveState.startPointer[0];
@@ -609,6 +644,10 @@ function PdfCanvas({
   };
 
   const handleMouseUp = () => {
+    if (panState) {
+      setPanState(null);
+      return;
+    }
     if (moveState) {
       const markupType = markups.find((m) => m.id === moveState.id)?.markup_type;
       const changed = livePoints && JSON.stringify(livePoints) !== JSON.stringify(moveState.originPoints);
@@ -659,6 +698,7 @@ function PdfCanvas({
       <div className="row">
         <select value={tool} onChange={(e) => selectTool(e.target.value as DrawTool)}>
           <option value="select">Select (no draw)</option>
+          <option value="pan">Pan (drag to scroll)</option>
           <optgroup label="Markup">
             <option value="Rectangle">Draw: Rectangle</option>
             <option value="Line">Draw: Line</option>
@@ -700,24 +740,49 @@ function PdfCanvas({
         )}
         <span className="muted">{pageScale ? `Scale: ${pageScale.inches_per_page_unit.toFixed(4)} in/pt (${pageScale.unit_system})` : "not calibrated"}</span>
       </div>
-      <div className="pdf-canvas-wrap" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
-        {imageUri ? (
-          <img src={imageUri} width={RENDER_WIDTH} height={renderedHeight} draggable={false} alt={`page ${page.page_number}`} />
-        ) : (
-          <div className="thumb-placeholder" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
-            rendering…
-          </div>
-        )}
-        <svg
-          ref={svgRef}
-          width={RENDER_WIDTH}
-          height={renderedHeight}
-          className="pdf-canvas-overlay"
-          style={{ cursor: moveState ? "grabbing" : resizeState ? "nwse-resize" : tool === "select" ? "default" : "crosshair" }}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-        >
+      <div className="row">
+        <button onClick={zoomOut} disabled={zoom <= ZOOM_MIN}>
+          −
+        </button>
+        <span className="muted">{Math.round(zoom * 100)}%</span>
+        <button onClick={zoomIn} disabled={zoom >= ZOOM_MAX}>
+          +
+        </button>
+        <button onClick={zoomReset} disabled={zoom === 1}>
+          Reset zoom
+        </button>
+      </div>
+      <div className="pdf-canvas-viewport" ref={viewportRef} style={{ width: RENDER_WIDTH, height: viewportHeight }}>
+        <div className="pdf-canvas-wrap" style={{ width: renderWidth, height: renderedHeight }}>
+          {imageUri ? (
+            <img src={imageUri} width={renderWidth} height={renderedHeight} draggable={false} alt={`page ${page.page_number}`} />
+          ) : (
+            <div className="thumb-placeholder" style={{ width: renderWidth, height: renderedHeight }}>
+              rendering…
+            </div>
+          )}
+          <svg
+            ref={svgRef}
+            width={renderWidth}
+            height={renderedHeight}
+            className="pdf-canvas-overlay"
+            style={{
+              cursor: panState
+                ? "grabbing"
+                : tool === "pan"
+                  ? "grab"
+                  : moveState
+                    ? "grabbing"
+                    : resizeState
+                      ? "nwse-resize"
+                      : tool === "select"
+                        ? "default"
+                        : "crosshair",
+            }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+          >
           <defs>
             <marker id={`arrowhead-${page.id}`} markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" />
@@ -826,6 +891,7 @@ function PdfCanvas({
               />
             );
           })()}
+        </div>
       </div>
     </div>
   );

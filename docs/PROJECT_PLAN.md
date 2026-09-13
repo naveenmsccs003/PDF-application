@@ -264,6 +264,35 @@ Phase 0 starts until the table above is clear.
       canvas interaction so far — clicking a list row and seeing the
       canvas highlight (and vice versa) through a signed-in
       `npm run tauri dev` session is still Naveen's check to run.
+  - **VIEW-01/02 zoom and pan (2026-09-13)**: closed the last two gaps in
+    the core canvas — VIEW-01 was `IN_PROGRESS` (backend renders at any
+    pixel width; no zoom UI) and VIEW-02 was `NOT_STARTED` (tile addressing
+    supports pan in principle; nothing interactive built). Didn't build
+    real tile-based rendering for either — that's VIEW-04 territory (large/
+    vector-heavy performance, still `NOT_STARTED`, needs the engine
+    validation spike first) and would have been scope creep here. Instead:
+    zoom re-requests the same `render_page_thumbnail` IPC command at
+    `RENDER_WIDTH * zoom` pixels (+/−/Reset buttons, 25%-200%, 25% steps);
+    `PdfCanvas`'s existing `scale` factor (page units per rendered pixel)
+    already derived from the rendered width rather than a hardcoded
+    constant, so `toPagePoint`/`toPixel` — and every markup/measurement
+    that reads through them — stayed correct at any zoom with no separate
+    fix. Pan needed an actual overflow to scroll through: split the single
+    `pdf-canvas-wrap` div into an outer `pdf-canvas-viewport` (fixed size,
+    `overflow: auto`, unaffected by zoom) and an inner content div sized to
+    the current `renderWidth`/`renderedHeight`, so zooming in now genuinely
+    overflows the viewport. Added a dedicated "Pan" tool (drag anywhere to
+    scroll, via direct `scrollLeft`/`scrollTop` writes on a `viewportRef`
+    rather than React state, so panning doesn't lag a render cycle behind
+    the pointer) alongside native scrollbar/trackpad scrolling, which
+    already worked for free once real overflow existed.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. No Rust
+      changes this pass (`render_page_thumbnail` already accepted an
+      arbitrary width). **NOT verified**: same live-IPC gap as every canvas
+      interaction so far — actually zooming/panning a real rendered page
+      through a signed-in `npm run tauri dev` session is still Naveen's
+      check to run.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

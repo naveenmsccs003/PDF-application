@@ -185,13 +185,16 @@ li {
   font-size: 0.85em;
 }
 
-.pdf-canvas-wrap {
-  position: relative;
+.pdf-canvas-viewport {
   max-width: 100%;
   overflow: auto;
   border: 1px solid #ddd;
   border-radius: 8px;
   margin: 0.5rem 0;
+}
+
+.pdf-canvas-wrap {
+  position: relative;
 }
 
 .pdf-canvas-wrap img {
@@ -243,7 +246,7 @@ li {
     background: #262626;
     border-color: #444;
   }
-  .pdf-canvas-wrap {
+  .pdf-canvas-viewport {
     border-color: #444;
   }
   .subtitle,
