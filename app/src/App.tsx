@@ -1468,7 +1468,7 @@ function RfiPanel({
           return (
             <li key={r.id}>
               <div>
-                <strong>#{r.number}</strong> {r.title} <span className="tag">{r.status}</span>
+                <strong>#{r.number}</strong> {r.title} <span className={`tag tag-${r.status.toLowerCase()}`}>{r.status}</span>
                 {pageNumber != null && <span className="tag">page {pageNumber}</span>}
                 {r.markup_id && <span className="tag">markup {r.markup_id.slice(0, 8)}</span>}
               </div>
