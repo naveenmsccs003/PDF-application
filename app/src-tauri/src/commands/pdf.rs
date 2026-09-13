@@ -227,10 +227,31 @@ impl PdfDocument for PageSizesDocument {
     }
 }
 
+/// Looks up any password stored for `document_id`, treating *any* keychain
+/// failure — not just "nothing stored" — as "proceed without one". A
+/// document that genuinely needs a password still fails informatively
+/// with `PdfCoreError::PasswordRequired` when `PdfEngine::open` is tried
+/// without it; the alternative (propagating a keychain connectivity
+/// error via `?`) would fail thumbnail rendering/export/print/autosave
+/// for every document, including unencrypted ones, whenever the OS
+/// keychain itself is unreachable (e.g. no Secret Service running).
+fn stored_pdf_password(document_id: &str) -> Option<String> {
+    match secrets::get_pdf_password(document_id) {
+        Ok(password) => password,
+        Err(e) => {
+            eprintln!("keychain lookup failed for document {document_id}, proceeding without a password: {e}");
+            None
+        }
+    }
+}
+
 /// SEC-01: `password` is only needed for an encrypted PDF (see
-/// `pdf_core::PdfCoreError::PasswordRequired` — the frontend recognizes
-/// that specific error and prompts for a password, then retries this same
-/// command with one). SEC-02: on success, a supplied password is stored
+/// `pdf_core::PdfCoreError::PasswordRequired`). The frontend's import form
+/// has its own password field the user can pre-fill if they already know
+/// a PDF is encrypted; there is currently no automatic "detect
+/// PasswordRequired and re-prompt" retry flow on that error — the error
+/// message alone surfaces in the existing error banner. SEC-02: on
+/// success, a supplied password is stored
 /// via `secrets::store_pdf_password` keyed by the new document's id, so
 /// `render_page_thumbnail`/exports don't need it passed in again every
 /// call — see `commands::recovery`'s module doc for why that matters
@@ -280,7 +301,7 @@ pub fn render_page_thumbnail(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         document::get_document(&conn, &document_id).map_err(|e| e.to_string())?.file_path
     };
-    let password = secrets::get_pdf_password(&document_id).map_err(|e| e.to_string())?;
+    let password = stored_pdf_password(&document_id);
     let page_index = (page_number - 1).max(0) as usize;
     let png_bytes = render_thumbnail(&state, &file_path, password.as_deref(), page_index, width)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
@@ -328,7 +349,7 @@ pub(crate) fn export_document_flattened_pdf(
         }
     }
 
-    let password = secrets::get_pdf_password(document_id).map_err(|e| e.to_string())?;
+    let password = stored_pdf_password(document_id);
     export_flattened(state, &file_path, password.as_deref(), output_path, markups_by_page_index)
 }
 

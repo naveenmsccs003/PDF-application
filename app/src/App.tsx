@@ -269,6 +269,10 @@ function DocumentsPanel({
       setThumbnails({});
     }
     setSelectedPageId(null);
+    // A password typed for the previous document must not survive the
+    // switch — otherwise clicking Save after switching documents would
+    // apply the old document's typed password to the new one.
+    setDocumentPasswordDraft("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDocumentId]);
 
@@ -532,6 +536,7 @@ function PdfCanvas({
   const [pendingTextValue, setPendingTextValue] = useState("");
   const [pendingCalibration, setPendingCalibration] = useState<{ p1: Point; p2: Point } | null>(null);
   const [pendingCalibrationInches, setPendingCalibrationInches] = useState("");
+  const calibrationInFlightRef = useRef(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [moveState, setMoveState] = useState<{ id: string; originPoints: Point[]; startPointer: Point } | null>(null);
   const [resizeState, setResizeState] = useState<{ id: string; pointIndex: number } | null>(null);
@@ -627,15 +632,31 @@ function PdfCanvas({
       onMeasurementCreated();
     });
 
-  const commitPendingCalibration = () =>
+  const commitPendingCalibration = () => {
+    // Enter (onKeyDown) and Tab-away (onBlur) can both fire for the same
+    // commit — Enter starts this async call, then the blur that follows
+    // immediately (before React re-renders with pendingCalibration
+    // cleared) would otherwise re-enter this function and submit a
+    // second, duplicate calibrateScale call. A ref-based guard is
+    // required rather than checking `pendingCalibration` itself, since
+    // that's React state and won't reflect this tick's clear until the
+    // next render.
+    if (calibrationInFlightRef.current) return;
+    const calibration = pendingCalibration;
+    const inches = Number(pendingCalibrationInches);
+    setPendingCalibration(null);
+    if (!calibration || !pendingCalibrationInches.trim() || !(inches > 0)) return;
+
+    calibrationInFlightRef.current = true;
     runAction(async () => {
-      const inches = Number(pendingCalibrationInches);
-      if (pendingCalibration && pendingCalibrationInches.trim() && inches > 0) {
-        const s = await api.calibrateScale(page.id, pendingCalibration.p1, pendingCalibration.p2, inches, "imperial", user.id);
+      try {
+        const s = await api.calibrateScale(page.id, calibration.p1, calibration.p2, inches, "imperial", user.id);
         onScaleChanged(s);
+      } finally {
+        calibrationInFlightRef.current = false;
       }
-      setPendingCalibration(null);
     });
+  };
 
   const selectTool = (t: DrawTool) => {
     setTool(t);
@@ -1132,8 +1153,12 @@ function PagePanel({
 
   const reloadMarkups = () =>
     runAction(async () => {
-      setMarkups(await api.listMarkupsByPage(page.id));
-      setUndoStatus(await api.markupUndoStatus(page.id));
+      const [markups, undoStatus] = await Promise.all([
+        api.listMarkupsByPage(page.id),
+        api.markupUndoStatus(page.id),
+      ]);
+      setMarkups(markups);
+      setUndoStatus(undoStatus);
     });
 
   useEffect(() => {
@@ -1421,8 +1446,13 @@ function RfiPanel({
   const updateStatus = (r: RfiDto) =>
     runAction(async () => {
       const status = statusDraft[r.id] ?? r.status;
+      // Always send the textarea's current value verbatim, including an
+      // empty string — this UI has no separate "leave response unchanged"
+      // affordance distinct from the box's content, so collapsing "" to
+      // null here would silently fail to let someone clear a response
+      // (set_status treats null as "leave untouched", not "clear it").
       const response = responseDraft[r.id] ?? r.response ?? "";
-      await api.setRfiStatus(r.id, status, response || null);
+      await api.setRfiStatus(r.id, status, response);
       await reload();
     });
 

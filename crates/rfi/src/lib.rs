@@ -130,8 +130,15 @@ fn decode_rfi(
 /// page and/or markup. `number` is assigned sequentially per document
 /// (1, 2, 3, ...) so RFIs can be referred to the way they are on a real
 /// job site ("RFI #14"), not by their opaque id.
+/// Takes `&mut Connection` (not `&Connection`, unlike most of this crate)
+/// so the number-assignment `SELECT` and the `INSERT` can share one
+/// transaction, per the project's own "writes wrapped in transactions"
+/// rule (`docs/database/README.md`) — without it, two concurrent callers
+/// could both read the same `MAX(number)` and then both insert the same
+/// number, hitting the `UNIQUE (document_id, number)` constraint instead
+/// of getting the sequential numbers they should.
 pub fn create(
-    conn: &Connection,
+    conn: &mut Connection,
     document_id: &str,
     page_id: Option<&str>,
     markup_id: Option<&str>,
@@ -139,7 +146,8 @@ pub fn create(
     description: Option<&str>,
     created_by: Option<&str>,
 ) -> Result<Rfi, RfiError> {
-    let number: i64 = conn.query_row(
+    let tx = conn.transaction()?;
+    let number: i64 = tx.query_row(
         "SELECT COALESCE(MAX(number), 0) + 1 FROM rfi WHERE document_id = ?1",
         params![document_id],
         |row| row.get(0),
@@ -156,7 +164,7 @@ pub fn create(
         response: None,
         created_by: created_by.map(str::to_string),
     };
-    conn.execute(
+    tx.execute(
         "INSERT INTO rfi (id, document_id, page_id, markup_id, number, title, description, status, response, created_by)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
@@ -172,6 +180,7 @@ pub fn create(
             rfi.created_by,
         ],
     )?;
+    tx.commit()?;
     Ok(rfi)
 }
 
@@ -257,11 +266,11 @@ mod tests {
 
     #[test]
     fn create_get_and_list_round_trip() {
-        let conn = open_test_db();
+        let mut conn = open_test_db();
         let (user_id, doc_id, page_id) = fixture_document(&conn);
 
         let created = create(
-            &conn,
+            &mut conn,
             &doc_id,
             Some(&page_id),
             None,
@@ -282,20 +291,20 @@ mod tests {
 
     #[test]
     fn numbers_increment_per_document() {
-        let conn = open_test_db();
+        let mut conn = open_test_db();
         let (_, doc_id, _) = fixture_document(&conn);
 
-        let first = create(&conn, &doc_id, None, None, "First question", None, None).unwrap();
-        let second = create(&conn, &doc_id, None, None, "Second question", None, None).unwrap();
+        let first = create(&mut conn, &doc_id, None, None, "First question", None, None).unwrap();
+        let second = create(&mut conn, &doc_id, None, None, "Second question", None, None).unwrap();
         assert_eq!(first.number, 1);
         assert_eq!(second.number, 2);
     }
 
     #[test]
     fn set_status_records_response_and_updates_status() {
-        let conn = open_test_db();
+        let mut conn = open_test_db();
         let (_, doc_id, _) = fixture_document(&conn);
-        let created = create(&conn, &doc_id, None, None, "Question", None, None).unwrap();
+        let created = create(&mut conn, &doc_id, None, None, "Question", None, None).unwrap();
 
         set_status(&conn, &created.id, RfiStatus::Answered, Some("Use 6in o.c. per spec")).unwrap();
         let answered = get(&conn, &created.id).unwrap();
@@ -317,9 +326,9 @@ mod tests {
 
     #[test]
     fn deleting_page_sets_rfi_page_id_null_but_keeps_rfi() {
-        let conn = open_test_db();
+        let mut conn = open_test_db();
         let (_, doc_id, page_id) = fixture_document(&conn);
-        let created = create(&conn, &doc_id, Some(&page_id), None, "Question", None, None).unwrap();
+        let created = create(&mut conn, &doc_id, Some(&page_id), None, "Question", None, None).unwrap();
 
         conn.execute("DELETE FROM page WHERE id = ?1", params![page_id]).unwrap();
 

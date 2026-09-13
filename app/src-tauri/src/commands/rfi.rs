@@ -15,9 +15,9 @@ pub fn create_rfi(
     description: Option<String>,
     created_by: Option<String>,
 ) -> Result<RfiDto, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     rfi::create(
-        &conn,
+        &mut conn,
         &document_id,
         page_id.as_deref(),
         markup_id.as_deref(),
