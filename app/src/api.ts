@@ -183,6 +183,10 @@ export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
 export const exportHandoffPackage = (documentId: string, outputDir: string) =>
   invoke<void>("export_handoff_package", { documentId, outputDir });
 
+// RFI-04: pixel-diff overlay between the same page in two saved revisions.
+export const compareDocumentVersions = (versionAId: string, versionBId: string, pageNumber: number, width: number) =>
+  invoke<string>("compare_document_versions", { versionAId, versionBId, pageNumber, width });
+
 export const printDocument = (documentId: string) => invoke<string>("print_document", { documentId });
 
 // -- recovery (REL-01/02) --

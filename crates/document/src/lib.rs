@@ -23,6 +23,8 @@ pub enum DocumentError {
     DocumentNotFound(String),
     #[error("page {0} not found")]
     PageNotFound(String),
+    #[error("document version {0} not found")]
+    VersionNotFound(String),
     #[error("rotation must be one of 0/90/180/270 degrees, got {0}")]
     InvalidRotation(i64),
     #[error("new page order must be a permutation of the document's existing pages")]
@@ -242,6 +244,29 @@ pub fn create_version(
     })
 }
 
+/// RFI-04: a single version by id — `list_versions` above already exists
+/// for the "browse revisions" UI, but comparing two specific revisions
+/// needs to fetch each one by the id the caller picked, not re-list and
+/// filter.
+pub fn get_version(conn: &Connection, version_id: &str) -> Result<DocumentVersionRecord, DocumentError> {
+    conn.query_row(
+        "SELECT id, document_id, version_number, file_snapshot_path, created_by
+         FROM document_version WHERE id = ?1",
+        params![version_id],
+        |row| {
+            Ok(DocumentVersionRecord {
+                id: row.get(0)?,
+                document_id: row.get(1)?,
+                version_number: row.get(2)?,
+                file_snapshot_path: row.get(3)?,
+                created_by: row.get(4)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| DocumentError::VersionNotFound(version_id.to_string()))
+}
+
 pub fn list_versions(
     conn: &Connection,
     document_id: &str,
@@ -424,5 +449,16 @@ mod tests {
 
         let versions = list_versions(&conn, &doc.id).unwrap();
         assert_eq!(versions, vec![v1, v2]);
+    }
+
+    #[test]
+    fn get_version_finds_by_id_and_errors_on_unknown() {
+        let mut conn = open_test_db();
+        let fake = three_page_doc();
+        let doc = import_document(&mut conn, &fake, "/tmp/x.pdf", "X", None).unwrap();
+        let v1 = create_version(&conn, &doc.id, "/snap/v1.pdf", None).unwrap();
+
+        assert_eq!(get_version(&conn, &v1.id).unwrap(), v1);
+        assert!(matches!(get_version(&conn, "missing"), Err(DocumentError::VersionNotFound(_))));
     }
 }

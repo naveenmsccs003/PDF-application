@@ -37,6 +37,16 @@ pub enum PdfCoreError {
     /// which needs a different UI response entirely.
     #[error("this PDF is password-protected and no password (or the wrong one) was supplied")]
     PasswordRequired,
+    /// RFI-04: `render_comparison_overlay`'s two input renders must be the
+    /// same size — they're expected to be the same page index rendered at
+    /// the same target width from two `DocumentVersion` snapshots, so a
+    /// mismatch means the caller compared the wrong pair (different pages,
+    /// or a page whose physical size genuinely changed between revisions,
+    /// which this function doesn't attempt to align/resize for — silently
+    /// stretching one render to match the other would misrepresent what
+    /// actually changed).
+    #[error("comparison renders have different dimensions: base is {base:?}, revised is {revised:?}")]
+    ComparisonDimensionMismatch { base: (u32, u32), revised: (u32, u32) },
 }
 
 /// A PDF engine capable of opening documents. `Document<'e>` borrows from
@@ -185,6 +195,53 @@ pub fn tile_grid(zoomed_width: u32, zoomed_height: u32, tile_size: u32) -> (u32,
     let cols = zoomed_width.div_ceil(tile_size);
     let rows = zoomed_height.div_ceil(tile_size);
     (cols, rows)
+}
+
+/// RFI-04: a pixel-level "what changed" overlay between two already-
+/// rendered page PNGs — typically the same page index rendered from two
+/// `DocumentVersion` flattened snapshots. Any pixel differing beyond a
+/// small tolerance (real PDF rendering is otherwise pixel-exact between
+/// runs of the same engine; the tolerance only absorbs incidental
+/// antialiasing jitter, not meant to fuzzy-match genuinely different
+/// content) is drawn in a flat highlight color; everything else is faded
+/// toward white so the highlight reads clearly against the underlying
+/// drawing. Pure image processing, no PDFium involved — same reasoning as
+/// `tile_grid` above for keeping this independently testable.
+pub fn render_comparison_overlay(base_png: &[u8], revised_png: &[u8]) -> Result<Vec<u8>, PdfCoreError> {
+    use std::io::Cursor;
+
+    let base = image::load_from_memory(base_png)?.to_rgba8();
+    let revised = image::load_from_memory(revised_png)?.to_rgba8();
+    if base.dimensions() != revised.dimensions() {
+        return Err(PdfCoreError::ComparisonDimensionMismatch {
+            base: base.dimensions(),
+            revised: revised.dimensions(),
+        });
+    }
+
+    const CHANGED_PIXEL_TOLERANCE: i32 = 24;
+    let highlight = image::Rgba([230u8, 30, 30, 255]);
+
+    let (width, height) = base.dimensions();
+    let mut overlay = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let a = base.get_pixel(x, y);
+            let b = revised.get_pixel(x, y);
+            let diff: i32 = a.0.iter().zip(b.0.iter()).map(|(&pa, &pb)| (pa as i32 - pb as i32).abs()).sum();
+            if diff > CHANGED_PIXEL_TOLERANCE {
+                overlay.put_pixel(x, y, highlight);
+            } else {
+                let gray = (b[0] as u32 + b[1] as u32 + b[2] as u32) / 3;
+                let faded = 255 - (255 - gray) / 3;
+                overlay.put_pixel(x, y, image::Rgba([faded as u8, faded as u8, faded as u8, 255]));
+            }
+        }
+    }
+
+    let mut bytes = Cursor::new(Vec::new());
+    overlay.write_to(&mut bytes, image::ImageFormat::Png)?;
+    Ok(bytes.into_inner())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -500,6 +557,63 @@ mod tests {
         assert_eq!(tile_grid(1000, 700, 256), (4, 3));
         // Exact multiples shouldn't add a spurious extra tile.
         assert_eq!(tile_grid(1024, 768, 256), (4, 3));
+    }
+
+    fn encode_png(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn comparison_overlay_highlights_only_the_changed_region() {
+        // Mid-tone background (not pure white) so "faded toward white" is
+        // actually observable on the unchanged pixels below.
+        let background = image::Rgba([40u8, 110, 180, 255]);
+        let black = image::Rgba([0u8, 0, 0, 255]);
+
+        let mut base = image::RgbaImage::new(4, 4);
+        for pixel in base.pixels_mut() {
+            *pixel = background;
+        }
+        let mut revised = base.clone();
+        revised.put_pixel(1, 1, black); // one changed pixel
+
+        let overlay_png = render_comparison_overlay(&encode_png(&base), &encode_png(&revised)).unwrap();
+        let overlay = image::load_from_memory(&overlay_png).unwrap().to_rgba8();
+
+        assert_eq!(overlay.dimensions(), (4, 4));
+        let changed = overlay.get_pixel(1, 1);
+        assert_eq!(changed.0[..3], [230, 30, 30]); // highlight color, alpha ignored
+
+        // An unchanged pixel is faded toward white, not left untouched or
+        // highlighted.
+        let unchanged = overlay.get_pixel(0, 0);
+        assert_ne!(unchanged, &background);
+        assert_ne!(unchanged.0[..3], [230, 30, 30]);
+    }
+
+    #[test]
+    fn comparison_overlay_is_blank_when_nothing_changed() {
+        let mut image_buf = image::RgbaImage::new(3, 3);
+        for pixel in image_buf.pixels_mut() {
+            *pixel = image::Rgba([100, 150, 200, 255]);
+        }
+        let png = encode_png(&image_buf);
+
+        let overlay_png = render_comparison_overlay(&png, &png).unwrap();
+        let overlay = image::load_from_memory(&overlay_png).unwrap().to_rgba8();
+        for pixel in overlay.pixels() {
+            assert_ne!(pixel.0[..3], [230, 30, 30]);
+        }
+    }
+
+    #[test]
+    fn comparison_overlay_rejects_mismatched_dimensions() {
+        let a = image::RgbaImage::new(4, 4);
+        let b = image::RgbaImage::new(4, 5);
+        let err = render_comparison_overlay(&encode_png(&a), &encode_png(&b)).unwrap_err();
+        assert!(matches!(err, PdfCoreError::ComparisonDimensionMismatch { .. }));
     }
 
     #[test]

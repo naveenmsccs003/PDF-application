@@ -722,6 +722,53 @@ Phase 0 starts until the table above is clear.
       as every other feature) — in particular, that a legitimate signed-in
       member is never wrongly denied by one of these checks in the actual
       running app, only that the logic is correct against fixtures.
+  - **RFI-04 revision comparison/overlay, first Backlog item taken up
+    (2026-09-14)**: with SEC-03 closed, every non-BACKLOG MVP row was
+    IMPLEMENTED, so per this doc's own gate ("backlog work shouldn't start
+    before REL/SEC/etc. close") the next phase moved to Backlog, in its
+    stated priority order — Overlay & Comparison first, which is exactly
+    what RFI-04 already was in `docs/features/FEATURE_REGISTRY.md`
+    (previously "Proposed deferral — confirm with Naveen"; that
+    confirmation never came either way, so this took the registry's
+    default of building it rather than leaving it in limbo indefinitely).
+    Scoped deliberately narrow: a **pixel-diff** overlay, not a structural
+    diff — `pdf_core::render_comparison_overlay` takes two already-
+    rendered page PNGs (typically the same page index from two
+    `DocumentVersion` flattened snapshots, RFI-03's existing artifact) and
+    highlights pixels differing beyond a small tolerance in red, fading
+    everything else toward white. Pure image math, no PDFium involved, so
+    it's independently testable against synthetic PNGs — same reasoning
+    already used for `tile_grid`. Added `document::get_version` (fetch one
+    `DocumentVersion` by id — `list_versions` existed for browsing, nothing
+    existed for "the two specific ones the user picked"). Wired as
+    `compare_document_versions` in `commands::pdf` (reuses the same
+    `render_thumbnail` PDF-engine-thread primitive `render_page_thumbnail`
+    already uses — a snapshot is a plain unencrypted flattened copy, so
+    unlike the original source PDF there's no password to look up here),
+    gated by the same SEC-03 `require_document_access` check as everything
+    else. Frontend: a "Compare revisions" control in `DocumentVersionsPanel`
+    — pick two versions + a page number, get back an overlay image.
+    - Deliberately NOT attempted: aligning/resizing when the two renders
+      are different pixel dimensions (a real page-size change between
+      revisions) — returns a typed `ComparisonDimensionMismatch` error
+      instead of silently stretching one to match, since a genuine size
+      change is itself worth surfacing, not hiding behind a diff that
+      would misrepresent it. No structural/vector diff (matching up a
+      shape that moved or resized) — this only sees pixels, which is a
+      real but simpler capability than what a CAD-style revision-cloud
+      tool does; upgrading to a structural diff would need markup-level
+      geometry comparison, not image processing, and wasn't attempted here.
+    - Verified: `cargo test -p pdf_core` — adds 3 tests (highlights only
+      the changed region on a synthetic image, produces no highlight when
+      nothing changed, rejects mismatched dimensions with the typed
+      error); `cargo test -p document` — adds 1 test (`get_version` found
+      by id / `VersionNotFound` on an unknown one). Full workspace
+      `cargo test` — 26/26 test blocks passing, no regressions.
+      `cargo check -p app` / `npm run build` — clean. **NOT verified**:
+      real click-through (same outstanding gap as every feature above) —
+      in particular, whether the chosen highlight color/fade actually
+      reads well against a real construction drawing rather than the flat
+      synthetic test colors used here.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

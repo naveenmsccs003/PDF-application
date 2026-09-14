@@ -1631,6 +1631,10 @@ function DocumentVersionsPanel({
   runAction: (fn: () => Promise<void>) => Promise<void>;
 }) {
   const [versions, setVersions] = useState<DocumentVersionDto[]>([]);
+  const [compareAId, setCompareAId] = useState("");
+  const [compareBId, setCompareBId] = useState("");
+  const [comparePage, setComparePage] = useState(1);
+  const [overlayDataUri, setOverlayDataUri] = useState<string | null>(null);
 
   const reload = () => runAction(async () => setVersions(await api.listDocumentVersions(doc.id)));
 
@@ -1646,6 +1650,12 @@ function DocumentVersionsPanel({
     });
 
   const openRevision = (v: DocumentVersionDto) => runAction(async () => openPath(v.file_snapshot_path));
+
+  const compareRevisions = () =>
+    runAction(async () => {
+      if (!compareAId || !compareBId) return;
+      setOverlayDataUri(await api.compareDocumentVersions(compareAId, compareBId, comparePage, 900));
+    });
 
   return (
     <div className="nested">
@@ -1664,6 +1674,43 @@ function DocumentVersionsPanel({
           </li>
         ))}
       </ul>
+
+      <h4>Compare revisions (RFI-04)</h4>
+      <p className="muted">
+        Renders one page from each revision and highlights what changed between them — changed pixels in red,
+        unchanged content faded.
+      </p>
+      <div className="row">
+        <select value={compareAId} onChange={(e) => setCompareAId(e.target.value)}>
+          <option value="">older revision…</option>
+          {versions.map((v) => (
+            <option key={v.id} value={v.id}>
+              v{v.version_number}
+            </option>
+          ))}
+        </select>
+        <select value={compareBId} onChange={(e) => setCompareBId(e.target.value)}>
+          <option value="">newer revision…</option>
+          {versions.map((v) => (
+            <option key={v.id} value={v.id}>
+              v{v.version_number}
+            </option>
+          ))}
+        </select>
+        <input
+          type="number"
+          min={1}
+          value={comparePage}
+          onChange={(e) => setComparePage(Number(e.target.value) || 1)}
+          style={{ width: "5em" }}
+        />
+        <button onClick={compareRevisions} disabled={!compareAId || !compareBId}>
+          Compare
+        </button>
+      </div>
+      {overlayDataUri && (
+        <img src={overlayDataUri} alt="Revision comparison overlay" style={{ maxWidth: "100%" }} />
+      )}
     </div>
   );
 }

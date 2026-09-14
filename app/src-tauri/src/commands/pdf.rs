@@ -388,3 +388,39 @@ pub fn export_flattened_pdf(
     }
     export_document_flattened_pdf(&state, &document_id, &output_path)
 }
+
+/// RFI-04: renders the same page from two saved revisions (DOC-02/RFI-03's
+/// `DocumentVersion` snapshots) and returns a pixel-diff overlay (see
+/// `pdf_core::render_comparison_overlay`) as a `data:` URI, same
+/// no-extra-round-trip reasoning as `render_page_thumbnail`. Each
+/// snapshot is a flattened copy already produced without a password (see
+/// `export_document_flattened_pdf`'s callers), so unlike importing the
+/// original source PDF there's no password to look up or pass through
+/// here.
+#[tauri::command]
+#[tracing::instrument(skip(state), err)]
+pub fn compare_document_versions(
+    state: tauri::State<AppState>,
+    version_a_id: String,
+    version_b_id: String,
+    page_number: i64,
+    width: u32,
+) -> Result<String, String> {
+    let (path_a, path_b) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let version_a = document::get_version(&conn, &version_a_id).map_err(|e| e.to_string())?;
+        let version_b = document::get_version(&conn, &version_b_id).map_err(|e| e.to_string())?;
+        if version_a.document_id != version_b.document_id {
+            return Err("cannot compare versions belonging to two different documents".to_string());
+        }
+        crate::authz::require_document_access(&conn, &state, &version_a.document_id)?;
+        (version_a.file_snapshot_path, version_b.file_snapshot_path)
+    };
+
+    let page_index = (page_number - 1).max(0) as usize;
+    let png_a = render_thumbnail(&state, &path_a, None, page_index, width)?;
+    let png_b = render_thumbnail(&state, &path_b, None, page_index, width)?;
+    let overlay_png = pdf_core::render_comparison_overlay(&png_a, &png_b).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(overlay_png);
+    Ok(format!("data:image/png;base64,{encoded}"))
+}
