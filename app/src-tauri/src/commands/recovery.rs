@@ -18,6 +18,7 @@ const MAX_SNAPSHOTS_PER_DOCUMENT: usize = 5;
 /// SQLite already durably persisting each edit is for (see the crate doc);
 /// this is a coarser safety net on top of that.
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn autosave_snapshot(state: tauri::State<AppState>, document_id: String) -> Result<RecoverySnapshotDto, String> {
     let snapshot_dir = state.data_dir.join("recovery");
     std::fs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
@@ -42,6 +43,7 @@ pub fn autosave_snapshot(state: tauri::State<AppState>, document_id: String) -> 
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_recovery_snapshots(state: tauri::State<AppState>, document_id: String) -> Result<Vec<RecoverySnapshotDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     recovery::list_by_document(&conn, &document_id)
@@ -53,6 +55,7 @@ pub fn list_recovery_snapshots(state: tauri::State<AppState>, document_id: Strin
 /// save dialog on the frontend) rather than touching any live data — see
 /// the crate doc for why.
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn restore_recovery_snapshot(state: tauri::State<AppState>, id: String, output_path: String) -> Result<(), String> {
     let snapshot_path = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -64,6 +67,7 @@ pub fn restore_recovery_snapshot(state: tauri::State<AppState>, id: String, outp
 
 /// REL-02 (discard): removes the recovery row and its file.
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn discard_recovery_snapshot(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let deleted = recovery::delete(&conn, &id).map_err(|e| e.to_string())?;

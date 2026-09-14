@@ -1359,6 +1359,16 @@ function TakeoffPanel({
 
   const exportCsv = () => runAction(async () => setCsv(await api.exportTakeoffCsv(doc.id)));
 
+  const exportXlsx = () =>
+    runAction(async () => {
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "Excel Workbook", extensions: ["xlsx"] }],
+        defaultPath: `${doc.title}-takeoff.xlsx`,
+      });
+      if (!outputPath) return;
+      await api.exportTakeoffXlsx(doc.id, outputPath);
+    });
+
   return (
     <div className="nested">
       <h3>Takeoff (TAKE-01–05)</h3>
@@ -1381,6 +1391,7 @@ function TakeoffPanel({
         ))}
       </ul>
       <button onClick={exportCsv}>Export CSV</button>
+      <button onClick={exportXlsx}>Export Excel…</button>
       {csv && <pre className="csv-preview">{csv}</pre>}
     </div>
   );

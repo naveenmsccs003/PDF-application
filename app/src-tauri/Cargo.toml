@@ -37,6 +37,9 @@ export = { path = "../../crates/export" }
 recovery = { path = "../../crates/recovery" }
 secrets = { path = "../../crates/secrets" }
 tauri-plugin-dialog = "2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2.5"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

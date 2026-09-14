@@ -14,6 +14,7 @@ use crate::AppState;
 use markup::{Command, Markup, MarkupGeometry, MarkupStyle, MarkupType};
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn create_markup(
     state: tauri::State<AppState>,
     page_id: String,
@@ -44,12 +45,14 @@ pub fn create_markup(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_markup(state: tauri::State<AppState>, id: String) -> Result<MarkupDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     markup::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_markups_by_page(state: tauri::State<AppState>, page_id: String) -> Result<Vec<MarkupDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     markup::list_by_page(&conn, &page_id)
@@ -58,6 +61,7 @@ pub fn list_markups_by_page(state: tauri::State<AppState>, page_id: String) -> R
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn update_markup_geometry(
     state: tauri::State<AppState>,
     id: String,
@@ -79,6 +83,7 @@ pub fn update_markup_geometry(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn update_markup_style(state: tauri::State<AppState>, id: String, style: MarkupStyle) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -91,6 +96,7 @@ pub fn update_markup_style(state: tauri::State<AppState>, id: String, style: Mar
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn set_markup_locked(state: tauri::State<AppState>, id: String, locked: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -103,6 +109,7 @@ pub fn set_markup_locked(state: tauri::State<AppState>, id: String, locked: bool
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn set_markup_hidden(state: tauri::State<AppState>, id: String, hidden: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -115,6 +122,7 @@ pub fn set_markup_hidden(state: tauri::State<AppState>, id: String, hidden: bool
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn delete_markup(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let markup_row = markup::get(&conn, &id).map_err(|e| e.to_string())?;
@@ -127,6 +135,7 @@ pub fn delete_markup(state: tauri::State<AppState>, id: String) -> Result<(), St
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn undo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
@@ -134,6 +143,7 @@ pub fn undo_markup(state: tauri::State<AppState>, page_id: String) -> Result<boo
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn redo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
@@ -141,6 +151,7 @@ pub fn redo_markup(state: tauri::State<AppState>, page_id: String) -> Result<boo
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn markup_undo_status(state: tauri::State<AppState>, page_id: String) -> Result<UndoStatusDto, String> {
     let stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     Ok(match stacks.get(&page_id) {
@@ -150,6 +161,7 @@ pub fn markup_undo_status(state: tauri::State<AppState>, page_id: String) -> Res
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn add_markup_comment(
     state: tauri::State<AppState>,
     markup_id: String,
@@ -163,6 +175,7 @@ pub fn add_markup_comment(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_markup_comments(state: tauri::State<AppState>, markup_id: String) -> Result<Vec<MarkupCommentDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     markup::list_comments(&conn, &markup_id)
@@ -171,6 +184,7 @@ pub fn list_markup_comments(state: tauri::State<AppState>, markup_id: String) ->
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn delete_markup_comment(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     markup::delete_comment(&conn, &id).map_err(|e| e.to_string())

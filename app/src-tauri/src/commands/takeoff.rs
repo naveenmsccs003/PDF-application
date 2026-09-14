@@ -4,6 +4,7 @@ use crate::dto::TakeoffItemDto;
 use crate::AppState;
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_takeoff_item(
     state: tauri::State<AppState>,
@@ -29,12 +30,14 @@ pub fn create_takeoff_item(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<TakeoffItemDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     takeoff::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_takeoff_for_measurement(state: tauri::State<AppState>, measurement_id: String) -> Result<Vec<TakeoffItemDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     takeoff::list_for_measurement(&conn, &measurement_id)
@@ -43,6 +46,7 @@ pub fn list_takeoff_for_measurement(state: tauri::State<AppState>, measurement_i
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_takeoff_for_document(state: tauri::State<AppState>, document_id: String) -> Result<Vec<TakeoffItemDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     takeoff::list_for_document(&conn, &document_id)
@@ -51,6 +55,7 @@ pub fn list_takeoff_for_document(state: tauri::State<AppState>, document_id: Str
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn update_takeoff_item(
     state: tauri::State<AppState>,
     id: String,
@@ -64,6 +69,7 @@ pub fn update_takeoff_item(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn delete_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     takeoff::delete(&conn, &id).map_err(|e| e.to_string())
@@ -73,8 +79,27 @@ pub fn delete_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<
 /// for why that's the natural scope — it joins through
 /// `measurement -> page -> document`).
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn export_takeoff_csv(state: tauri::State<AppState>, document_id: String) -> Result<String, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let items = takeoff::list_for_document(&conn, &document_id).map_err(|e| e.to_string())?;
     Ok(takeoff::export_csv(&items))
+}
+
+/// TAKE-05 (Excel half): unlike the CSV row above, this writes straight to
+/// a caller-chosen path rather than returning content to preview in a
+/// `<pre>` — an `.xlsx` is a zip archive, not text, so there's nothing
+/// sensible to display inline; the frontend gets the path from a save
+/// dialog first, same pattern as `export_flattened_pdf`.
+#[tauri::command]
+#[tracing::instrument(skip(state), err)]
+pub fn export_takeoff_xlsx(
+    state: tauri::State<AppState>,
+    document_id: String,
+    output_path: String,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let items = takeoff::list_for_document(&conn, &document_id).map_err(|e| e.to_string())?;
+    let bytes = takeoff::export_xlsx(&items).map_err(|e| e.to_string())?;
+    std::fs::write(&output_path, bytes).map_err(|e| e.to_string())
 }

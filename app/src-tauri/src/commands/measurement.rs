@@ -30,6 +30,7 @@ fn parse_area_unit(unit: &str) -> Result<AreaUnit, String> {
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn calibrate_scale(
     state: tauri::State<AppState>,
     page_id: String,
@@ -54,6 +55,7 @@ pub fn calibrate_scale(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn latest_scale_for_page(state: tauri::State<AppState>, page_id: String) -> Result<Option<ScaleDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     measurement::latest_scale_for_page(&conn, &page_id)
@@ -62,6 +64,7 @@ pub fn latest_scale_for_page(state: tauri::State<AppState>, page_id: String) -> 
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn record_length(
     state: tauri::State<AppState>,
     page_id: String,
@@ -79,6 +82,7 @@ pub fn record_length(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn record_area(
     state: tauri::State<AppState>,
     page_id: String,
@@ -96,6 +100,7 @@ pub fn record_area(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn record_count(
     state: tauri::State<AppState>,
     page_id: String,
@@ -110,12 +115,14 @@ pub fn record_count(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_measurement(state: tauri::State<AppState>, id: String) -> Result<MeasurementDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     measurement::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_measurements_by_page(state: tauri::State<AppState>, page_id: String) -> Result<Vec<MeasurementDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     measurement::list_by_page(&conn, &page_id)
@@ -124,6 +131,7 @@ pub fn list_measurements_by_page(state: tauri::State<AppState>, page_id: String)
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn delete_measurement(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     measurement::delete(&conn, &id).map_err(|e| e.to_string())

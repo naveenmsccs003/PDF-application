@@ -328,6 +328,9 @@ export const deleteTakeoffItem = (id: string) => invoke<void>("delete_takeoff_it
 
 export const exportTakeoffCsv = (documentId: string) => invoke<string>("export_takeoff_csv", { documentId });
 
+export const exportTakeoffXlsx = (documentId: string, outputPath: string) =>
+  invoke<void>("export_takeoff_xlsx", { documentId, outputPath });
+
 // -- rfi --
 
 export const createRfi = (

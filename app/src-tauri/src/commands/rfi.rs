@@ -5,6 +5,7 @@ use crate::AppState;
 use rfi::RfiStatus;
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_rfi(
     state: tauri::State<AppState>,
@@ -30,12 +31,14 @@ pub fn create_rfi(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_rfi(state: tauri::State<AppState>, id: String) -> Result<RfiDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     rfi::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_rfis_for_document(state: tauri::State<AppState>, document_id: String) -> Result<Vec<RfiDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     rfi::list_by_document(&conn, &document_id)
@@ -44,6 +47,7 @@ pub fn list_rfis_for_document(state: tauri::State<AppState>, document_id: String
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn set_rfi_status(
     state: tauri::State<AppState>,
     id: String,

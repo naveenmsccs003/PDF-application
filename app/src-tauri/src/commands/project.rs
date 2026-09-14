@@ -4,6 +4,7 @@ use crate::dto::{ProjectDto, ProjectMemberDto, UserDto};
 use crate::AppState;
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn create_user(state: tauri::State<AppState>, email: String, display_name: String) -> Result<UserDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     project::create_user(&conn, &email, &display_name)
@@ -12,6 +13,7 @@ pub fn create_user(state: tauri::State<AppState>, email: String, display_name: S
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_user_by_email(state: tauri::State<AppState>, email: String) -> Result<UserDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     project::get_user_by_email(&conn, &email)
@@ -20,6 +22,7 @@ pub fn get_user_by_email(state: tauri::State<AppState>, email: String) -> Result
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn create_project(state: tauri::State<AppState>, name: String, created_by: String) -> Result<ProjectDto, String> {
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     project::create_project(&mut conn, &name, &created_by)
@@ -28,6 +31,7 @@ pub fn create_project(state: tauri::State<AppState>, name: String, created_by: S
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_projects_for_user(state: tauri::State<AppState>, user_id: String) -> Result<Vec<ProjectDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     project::list_projects_for_user(&conn, &user_id)
@@ -36,6 +40,7 @@ pub fn list_projects_for_user(state: tauri::State<AppState>, user_id: String) ->
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn add_project_member(
     state: tauri::State<AppState>,
     project_id: String,
@@ -49,6 +54,7 @@ pub fn add_project_member(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_project_members(state: tauri::State<AppState>, project_id: String) -> Result<Vec<ProjectMemberDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     project::list_members(&conn, &project_id)
@@ -57,6 +63,7 @@ pub fn list_project_members(state: tauri::State<AppState>, project_id: String) -
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn remove_project_member(state: tauri::State<AppState>, project_id: String, user_id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     project::remove_member(&conn, &project_id, &user_id).map_err(|e| e.to_string())

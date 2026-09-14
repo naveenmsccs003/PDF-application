@@ -8,6 +8,7 @@ use crate::dto::{DocumentDto, DocumentVersionDto, PageDto};
 use crate::AppState;
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_document(state: tauri::State<AppState>, document_id: String) -> Result<DocumentDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     document::get_document(&conn, &document_id)
@@ -16,6 +17,7 @@ pub fn get_document(state: tauri::State<AppState>, document_id: String) -> Resul
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_documents_for_project(state: tauri::State<AppState>, project_id: String) -> Result<Vec<DocumentDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     document::list_documents_for_project(&conn, &project_id)
@@ -24,6 +26,7 @@ pub fn list_documents_for_project(state: tauri::State<AppState>, project_id: Str
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_pages(state: tauri::State<AppState>, document_id: String) -> Result<Vec<PageDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     document::list_pages(&conn, &document_id)
@@ -32,18 +35,21 @@ pub fn list_pages(state: tauri::State<AppState>, document_id: String) -> Result<
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn set_page_rotation(state: tauri::State<AppState>, page_id: String, rotation: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     document::set_page_rotation(&conn, &page_id, rotation).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn reorder_pages(state: tauri::State<AppState>, document_id: String, new_order: Vec<String>) -> Result<(), String> {
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     document::reorder_pages(&mut conn, &document_id, &new_order).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn create_document_version(
     state: tauri::State<AppState>,
     document_id: String,
@@ -57,6 +63,7 @@ pub fn create_document_version(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_document_versions(state: tauri::State<AppState>, document_id: String) -> Result<Vec<DocumentVersionDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     document::list_versions(&conn, &document_id)
@@ -74,6 +81,7 @@ pub fn list_document_versions(state: tauri::State<AppState>, document_id: String
 /// user action instead of "export somewhere, then remember to also record
 /// a version pointing at it."
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn save_document_revision(
     state: tauri::State<AppState>,
     document_id: String,

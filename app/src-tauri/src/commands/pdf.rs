@@ -76,9 +76,9 @@ pub enum PdfEngineRequest {
 pub fn spawn_pdf_engine_thread() -> Option<mpsc::Sender<PdfEngineRequest>> {
     let lib_path = dev_pdfium_lib_path();
     if !lib_path.exists() {
-        eprintln!(
-            "libpdfium.so not found at {}; PDF import/render commands will be unavailable this session (see crates/pdf_engine_spike/README.md)",
-            lib_path.display()
+        tracing::warn!(
+            path = %lib_path.display(),
+            "libpdfium.so not found; PDF import/render commands will be unavailable this session (see crates/pdf_engine_spike/README.md)"
         );
         return None;
     }
@@ -90,7 +90,7 @@ pub fn spawn_pdf_engine_thread() -> Option<mpsc::Sender<PdfEngineRequest>> {
         let engine = match pdf_core::PdfiumEngine::new(&lib_path) {
             Ok(engine) => engine,
             Err(e) => {
-                eprintln!("PDF engine failed to initialize: {e}");
+                tracing::error!(error = %e, "PDF engine failed to initialize");
                 let _ = ready_tx.send(false);
                 return;
             }
@@ -239,7 +239,7 @@ fn stored_pdf_password(document_id: &str) -> Option<String> {
     match secrets::get_pdf_password(document_id) {
         Ok(password) => password,
         Err(e) => {
-            eprintln!("keychain lookup failed for document {document_id}, proceeding without a password: {e}");
+            tracing::warn!(document_id, error = %e, "keychain lookup failed, proceeding without a password");
             None
         }
     }
@@ -261,6 +261,7 @@ fn stored_pdf_password(document_id: &str) -> Option<String> {
 /// succeeded, and failing the whole operation over a credential-store
 /// hiccup would be a worse outcome than just re-prompting next time.
 #[tauri::command]
+#[tracing::instrument(skip(state, password), err)]
 pub fn import_pdf_document(
     state: tauri::State<AppState>,
     path: String,
@@ -280,7 +281,7 @@ pub fn import_pdf_document(
 
     if let Some(password) = password.as_deref() {
         if let Err(e) = secrets::store_pdf_password(&document.id, password) {
-            eprintln!("failed to store PDF password for document {}: {e}", document.id);
+            tracing::error!(document_id = %document.id, error = %e, "failed to store PDF password in the OS keychain");
         }
     }
 
@@ -291,6 +292,7 @@ pub fn import_pdf_document(
 /// frontend can drop it straight into an `<img src>` with no extra IPC
 /// round trip to fetch bytes separately.
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn render_page_thumbnail(
     state: tauri::State<AppState>,
     document_id: String,
@@ -313,12 +315,14 @@ pub fn render_page_thumbnail(
 /// re-importing. Useful if the password wasn't known/entered at import
 /// time, or needs to be corrected.
 #[tauri::command]
+#[tracing::instrument(skip(password), err)]
 pub fn set_document_pdf_password(document_id: String, password: String) -> Result<(), String> {
     secrets::store_pdf_password(&document_id, &password).map_err(|e| e.to_string())
 }
 
 /// SEC-02: forgets any password stored for `document_id`.
 #[tauri::command]
+#[tracing::instrument(err)]
 pub fn clear_document_pdf_password(document_id: String) -> Result<(), String> {
     secrets::delete_pdf_password(&document_id).map_err(|e| e.to_string())
 }
@@ -359,6 +363,7 @@ pub(crate) fn export_document_flattened_pdf(
 /// division of responsibility as `import_pdf_document` taking an
 /// already-chosen `path` from an open dialog).
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn export_flattened_pdf(
     state: tauri::State<AppState>,
     document_id: String,

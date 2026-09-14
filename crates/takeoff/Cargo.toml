@@ -7,3 +7,7 @@ edition = "2021"
 rusqlite = { version = "0.32", features = ["bundled"] }
 mds_db = { path = "../mds_db" }
 thiserror = "1"
+rust_xlsxwriter = "0.99.0"
+
+[dev-dependencies]
+calamine = "0.36.1"

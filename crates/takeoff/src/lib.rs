@@ -18,6 +18,8 @@ pub enum TakeoffError {
     Sqlite(#[from] rusqlite::Error),
     #[error("takeoff item {0} not found")]
     NotFound(String),
+    #[error("xlsx error: {0}")]
+    Xlsx(#[from] rust_xlsxwriter::XlsxError),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +200,55 @@ pub fn export_csv(items: &[TakeoffItem]) -> String {
     out
 }
 
+/// TAKE-05 (Excel half): the same rows as [`export_csv`], as a real `.xlsx`
+/// workbook rather than hand-rolled text — `rust_xlsxwriter` writes the
+/// zip/XML container directly, no spreadsheet application involved. Numeric
+/// columns are written as numbers (not strings) so totals/costs are usable
+/// in-sheet, matching what "export to Excel" actually means to an estimator
+/// (sortable, summable columns), not just CSV wrapped in a different file
+/// extension.
+pub fn export_xlsx(items: &[TakeoffItem]) -> Result<Vec<u8>, TakeoffError> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet().set_name("Takeoff")?;
+
+    let header_format = Format::new().set_bold();
+    let headers = [
+        "Description",
+        "Quantity",
+        "Unit",
+        "Cost per unit",
+        "Total cost",
+        "Notes",
+    ];
+    for (col, header) in headers.iter().enumerate() {
+        sheet.write_with_format(0, col as u16, *header, &header_format)?;
+    }
+
+    for (i, item) in items.iter().enumerate() {
+        let row = (i + 1) as u32;
+        sheet.write(row, 0, &item.description)?;
+        sheet.write(row, 1, item.quantity)?;
+        sheet.write(row, 2, &item.unit)?;
+        match item.cost_per_unit {
+            Some(cost) => sheet.write(row, 3, cost)?,
+            None => sheet.write(row, 3, "")?,
+        };
+        match item.total_cost() {
+            Some(total) => sheet.write(row, 4, total)?,
+            None => sheet.write(row, 4, "")?,
+        };
+        sheet.write(row, 5, item.notes.as_deref().unwrap_or(""))?;
+    }
+
+    for col in 0..headers.len() as u16 {
+        sheet.set_column_width(col, 18)?;
+    }
+
+    workbook.save_to_buffer().map_err(TakeoffError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +394,67 @@ mod tests {
             export_csv(&[]),
             "description,quantity,unit,cost_per_unit,total_cost,notes\n"
         );
+    }
+
+    #[test]
+    fn xlsx_export_round_trips_through_a_real_reader() {
+        use calamine::{Data, Reader};
+
+        let items = vec![
+            TakeoffItem {
+                id: "1".into(),
+                measurement_id: None,
+                description: "#4 rebar".into(),
+                quantity: 3.0,
+                unit: "ea".into(),
+                cost_per_unit: Some(12.5),
+                notes: None,
+            },
+            TakeoffItem {
+                id: "2".into(),
+                measurement_id: None,
+                description: "Wall A, north face".into(),
+                quantity: 1.0,
+                unit: "ea".into(),
+                cost_per_unit: None,
+                notes: Some("has \"quotes\"".into()),
+            },
+        ];
+
+        let bytes = export_xlsx(&items).unwrap();
+        // A real xlsx is a zip archive; confirm the magic bytes rather than
+        // just trusting the writer didn't error.
+        assert_eq!(&bytes[0..2], b"PK");
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut workbook: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
+        let sheet = workbook.worksheet_range("Takeoff").unwrap();
+
+        assert_eq!(sheet.get_value((0, 0)), Some(&Data::String("Description".into())));
+        assert_eq!(sheet.get_value((1, 0)), Some(&Data::String("#4 rebar".into())));
+        assert_eq!(sheet.get_value((1, 1)), Some(&Data::Float(3.0)));
+        assert_eq!(sheet.get_value((1, 3)), Some(&Data::Float(12.5)));
+        assert_eq!(sheet.get_value((1, 4)), Some(&Data::Float(37.5)));
+        assert_eq!(
+            sheet.get_value((2, 0)),
+            Some(&Data::String("Wall A, north face".into()))
+        );
+        assert_eq!(sheet.get_value((2, 3)), Some(&Data::Empty));
+        assert_eq!(
+            sheet.get_value((2, 5)),
+            Some(&Data::String("has \"quotes\"".into()))
+        );
+    }
+
+    #[test]
+    fn xlsx_export_of_empty_list_still_has_a_header_row() {
+        use calamine::{Data, Reader};
+
+        let bytes = export_xlsx(&[]).unwrap();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut workbook: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
+        let sheet = workbook.worksheet_range("Takeoff").unwrap();
+        assert_eq!(sheet.get_value((0, 0)), Some(&Data::String("Description".into())));
+        assert_eq!(sheet.get_value((1, 0)), None);
     }
 }

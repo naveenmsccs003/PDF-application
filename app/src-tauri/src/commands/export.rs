@@ -17,6 +17,7 @@ fn sanitize_filename_component(s: &str) -> String {
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn export_handoff_package(
     state: tauri::State<AppState>,
     document_id: String,
@@ -58,6 +59,7 @@ pub fn export_handoff_package(
 /// snapshot. Returns the path so the frontend can hand it to
 /// `openPath` (`@tauri-apps/plugin-opener`) itself.
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn print_document(state: tauri::State<AppState>, document_id: String) -> Result<String, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
