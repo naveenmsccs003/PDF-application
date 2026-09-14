@@ -8,42 +8,53 @@ use crate::dto::{DocumentDto, DocumentVersionDto, PageDto};
 use crate::AppState;
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn get_document(state: tauri::State<AppState>, document_id: String) -> Result<DocumentDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::get_document(&conn, &document_id)
         .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_documents_for_project(state: tauri::State<AppState>, project_id: String) -> Result<Vec<DocumentDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_project_membership(&conn, &state, &project_id)?;
     document::list_documents_for_project(&conn, &project_id)
         .map(|docs| docs.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_pages(state: tauri::State<AppState>, document_id: String) -> Result<Vec<PageDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::list_pages(&conn, &document_id)
         .map(|pages| pages.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn set_page_rotation(state: tauri::State<AppState>, page_id: String, rotation: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     document::set_page_rotation(&conn, &page_id, rotation).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn reorder_pages(state: tauri::State<AppState>, document_id: String, new_order: Vec<String>) -> Result<(), String> {
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::reorder_pages(&mut conn, &document_id, &new_order).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn create_document_version(
     state: tauri::State<AppState>,
     document_id: String,
@@ -51,15 +62,55 @@ pub fn create_document_version(
     created_by: Option<String>,
 ) -> Result<DocumentVersionDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::create_version(&conn, &document_id, &file_snapshot_path, created_by.as_deref())
         .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(state), err)]
 pub fn list_document_versions(state: tauri::State<AppState>, document_id: String) -> Result<Vec<DocumentVersionDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::list_versions(&conn, &document_id)
         .map(|versions| versions.into_iter().map(Into::into).collect())
+        .map_err(|e| e.to_string())
+}
+
+/// RFI-03 (drawing revision tracking): the registry's own note calls this
+/// "overlaps DocumentVersion" — `create_document_version` above already
+/// covers the domain logic, it just requires a snapshot file to already
+/// exist at some path. This command produces that snapshot itself (a
+/// flattened copy, reusing EXPORT-01's `export_document_flattened_pdf`,
+/// same as REL-01's autosave and EXPORT-03's handoff package) under
+/// `data_dir/versions/`, then records it — so "save a revision" is one
+/// user action instead of "export somewhere, then remember to also record
+/// a version pointing at it."
+#[tauri::command]
+#[tracing::instrument(skip(state), err)]
+pub fn save_document_revision(
+    state: tauri::State<AppState>,
+    document_id: String,
+    created_by: Option<String>,
+) -> Result<DocumentVersionDto, String> {
+    let versions_dir = state.data_dir.join("versions");
+    std::fs::create_dir_all(&versions_dir).map_err(|e| e.to_string())?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let snapshot_path = versions_dir.join(format!("{document_id}-{timestamp}.pdf"));
+    let snapshot_path_str = snapshot_path.to_str().ok_or("snapshot path is not valid UTF-8")?;
+
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
+    crate::commands::pdf::export_document_flattened_pdf(&state, &document_id, snapshot_path_str)?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    document::create_version(&conn, &document_id, snapshot_path_str, created_by.as_deref())
+        .map(Into::into)
         .map_err(|e| e.to_string())
 }

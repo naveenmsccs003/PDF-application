@@ -5,7 +5,8 @@
 //! `MarkupType`/`MarkupGeometry`/`MarkupStyle` are the one exception: they
 //! already derive `Serialize`/`Deserialize` for their own JSON persistence
 //! (see `crates/markup`), so DTOs below embed them directly rather than
-//! re-flattening equivalent fields.
+//! re-flattening equivalent fields. `rfi::RfiStatus` does the same, since
+//! it also needs to flow as a Tauri command parameter.
 
 #[derive(serde::Serialize)]
 pub struct UserDto {
@@ -135,6 +136,12 @@ pub struct MarkupDto {
     pub hidden: bool,
 }
 
+#[derive(serde::Serialize)]
+pub struct UndoStatusDto {
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
 impl From<markup::Markup> for MarkupDto {
     fn from(m: markup::Markup) -> Self {
         Self {
@@ -227,6 +234,56 @@ pub struct TakeoffItemDto {
     pub cost_per_unit: Option<f64>,
     pub notes: Option<String>,
     pub total_cost: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct RfiDto {
+    pub id: String,
+    pub document_id: String,
+    pub page_id: Option<String>,
+    pub markup_id: Option<String>,
+    pub number: i64,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: rfi::RfiStatus,
+    pub response: Option<String>,
+    pub created_by: Option<String>,
+}
+
+impl From<rfi::Rfi> for RfiDto {
+    fn from(r: rfi::Rfi) -> Self {
+        Self {
+            id: r.id,
+            document_id: r.document_id,
+            page_id: r.page_id,
+            markup_id: r.markup_id,
+            number: r.number,
+            title: r.title,
+            description: r.description,
+            status: r.status,
+            response: r.response,
+            created_by: r.created_by,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct RecoverySnapshotDto {
+    pub id: String,
+    pub document_id: String,
+    pub snapshot_path: String,
+    pub created_at: String,
+}
+
+impl From<recovery::RecoverySnapshot> for RecoverySnapshotDto {
+    fn from(s: recovery::RecoverySnapshot) -> Self {
+        Self {
+            id: s.id,
+            document_id: s.document_id,
+            snapshot_path: s.snapshot_path,
+            created_at: s.created_at,
+        }
+    }
 }
 
 impl From<takeoff::TakeoffItem> for TakeoffItemDto {

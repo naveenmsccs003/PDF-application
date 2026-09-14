@@ -6,8 +6,11 @@
 //! Scope is deliberately limited to what Phase 2 (PDF Core) needs — open,
 //! page metadata, render, extract text, save/reopen — and to what the
 //! Section 6 validation spike (`crates/pdf_engine_spike`) actually proved
-//! works. Annotation support belongs to Phase 3 (Markup) and is not
-//! exposed here yet.
+//! works, plus `flatten_page_with_annotations` for EXPORT-01 (flattened PDF
+//! export), added once there was a real `markup` domain to burn into a
+//! page. Annotation *editing* (an interactive PDF annotation layer,
+//! distinct from write-once export) still belongs to Phase 3 and isn't
+//! exposed here.
 
 use std::path::Path;
 
@@ -26,6 +29,24 @@ pub enum PdfCoreError {
         zoomed_width: u32,
         zoomed_height: u32,
     },
+    /// SEC-01: this PDF is encrypted and either no password was supplied
+    /// or the one supplied was wrong. Deliberately its own variant (mapped
+    /// from Pdfium's own `FPDF_ERR_PASSWORD`, not left folded into the
+    /// generic `Pdfium(PdfiumError)` case) so a caller can distinguish "ask
+    /// the user for a password and retry" from every other failure mode,
+    /// which needs a different UI response entirely.
+    #[error("this PDF is password-protected and no password (or the wrong one) was supplied")]
+    PasswordRequired,
+    /// RFI-04: `render_comparison_overlay`'s two input renders must be the
+    /// same size — they're expected to be the same page index rendered at
+    /// the same target width from two `DocumentVersion` snapshots, so a
+    /// mismatch means the caller compared the wrong pair (different pages,
+    /// or a page whose physical size genuinely changed between revisions,
+    /// which this function doesn't attempt to align/resize for — silently
+    /// stretching one render to match the other would misrepresent what
+    /// actually changed).
+    #[error("comparison renders have different dimensions: base is {base:?}, revised is {revised:?}")]
+    ComparisonDimensionMismatch { base: (u32, u32), revised: (u32, u32) },
 }
 
 /// A PDF engine capable of opening documents. `Document<'e>` borrows from
@@ -38,7 +59,36 @@ pub trait PdfEngine {
     where
         Self: 'e;
 
-    fn open<'e>(&'e self, path: &Path) -> Result<Self::Document<'e>, PdfCoreError>;
+    /// SEC-01: `password` is `None` for the overwhelming majority of PDFs
+    /// (unencrypted); an encrypted one without a correct password errors
+    /// with `PdfCoreError::PasswordRequired` rather than any other error
+    /// variant, so callers can prompt and retry specifically for that case.
+    fn open<'e>(&'e self, path: &Path, password: Option<&'e str>) -> Result<Self::Document<'e>, PdfCoreError>;
+}
+
+/// One drawable annotation to burn into a page for EXPORT-01. Deliberately
+/// minimal — a stroked polyline/polygon covers Rectangle/Line/Arrow/Cloud
+/// markups (a rectangle is its 4 corners as a closed path; Arrow's
+/// direction indicator isn't drawn — the shaft is enough to show what was
+/// marked up, and a real arrowhead is cosmetic, not required by EXPORT-01)
+/// and one text run covers Text markups. Coordinates are PDF points,
+/// bottom-up (PDF's native origin) — callers translate from whatever
+/// top-down coordinate space their own geometry uses before constructing
+/// one of these.
+pub enum FlattenAnnotation {
+    Path {
+        points: Vec<(f32, f32)>,
+        closed: bool,
+        stroke_rgb: (u8, u8, u8),
+        stroke_width_pt: f32,
+    },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        font_size_pt: f32,
+        rgb: (u8, u8, u8),
+    },
 }
 
 pub trait PdfDocument {
@@ -58,6 +108,24 @@ pub trait PdfDocument {
     fn extract_text(&self, page_index: usize) -> Result<String, PdfCoreError>;
 
     fn save(&self, path: &Path) -> Result<(), PdfCoreError>;
+
+    /// EXPORT-01: burns `annotations` into `page_index`'s actual page
+    /// content, so they survive as real PDF page content rather than
+    /// separate application-level `Markup` rows — the point of a
+    /// "flattened" export. Default implementation is a no-op, so the
+    /// `PdfDocument` test doubles in `document`/`e2e_tests` (which exercise
+    /// import, not export) don't need updating for this; `PdfiumDocument`
+    /// below overrides it with the real implementation. Takes `&mut self`
+    /// (unlike every other method here) because adding page content and
+    /// registering a font are the one operation in this trait pdfium-render
+    /// itself requires mutable access for.
+    fn flatten_page_with_annotations(
+        &mut self,
+        _page_index: usize,
+        _annotations: &[FlattenAnnotation],
+    ) -> Result<(), PdfCoreError> {
+        Ok(())
+    }
 
     /// Renders one tile of `page_index` at zoom level `zoomed_width` (the
     /// full page's pixel width at the current zoom — height follows from
@@ -129,6 +197,53 @@ pub fn tile_grid(zoomed_width: u32, zoomed_height: u32, tile_size: u32) -> (u32,
     (cols, rows)
 }
 
+/// RFI-04: a pixel-level "what changed" overlay between two already-
+/// rendered page PNGs — typically the same page index rendered from two
+/// `DocumentVersion` flattened snapshots. Any pixel differing beyond a
+/// small tolerance (real PDF rendering is otherwise pixel-exact between
+/// runs of the same engine; the tolerance only absorbs incidental
+/// antialiasing jitter, not meant to fuzzy-match genuinely different
+/// content) is drawn in a flat highlight color; everything else is faded
+/// toward white so the highlight reads clearly against the underlying
+/// drawing. Pure image processing, no PDFium involved — same reasoning as
+/// `tile_grid` above for keeping this independently testable.
+pub fn render_comparison_overlay(base_png: &[u8], revised_png: &[u8]) -> Result<Vec<u8>, PdfCoreError> {
+    use std::io::Cursor;
+
+    let base = image::load_from_memory(base_png)?.to_rgba8();
+    let revised = image::load_from_memory(revised_png)?.to_rgba8();
+    if base.dimensions() != revised.dimensions() {
+        return Err(PdfCoreError::ComparisonDimensionMismatch {
+            base: base.dimensions(),
+            revised: revised.dimensions(),
+        });
+    }
+
+    const CHANGED_PIXEL_TOLERANCE: i32 = 24;
+    let highlight = image::Rgba([230u8, 30, 30, 255]);
+
+    let (width, height) = base.dimensions();
+    let mut overlay = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let a = base.get_pixel(x, y);
+            let b = revised.get_pixel(x, y);
+            let diff: i32 = a.0.iter().zip(b.0.iter()).map(|(&pa, &pb)| (pa as i32 - pb as i32).abs()).sum();
+            if diff > CHANGED_PIXEL_TOLERANCE {
+                overlay.put_pixel(x, y, highlight);
+            } else {
+                let gray = (b[0] as u32 + b[1] as u32 + b[2] as u32) / 3;
+                let faded = 255 - (255 - gray) / 3;
+                overlay.put_pixel(x, y, image::Rgba([faded as u8, faded as u8, faded as u8, 255]));
+            }
+        }
+    }
+
+    let mut bytes = Cursor::new(Vec::new());
+    overlay.write_to(&mut bytes, image::ImageFormat::Png)?;
+    Ok(bytes.into_inner())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TileKey {
     pub page_index: usize,
@@ -187,6 +302,20 @@ impl TileCache {
     }
 }
 
+/// The pdfium shared library's filename on the platform this is compiled
+/// for (`libpdfium.so` on Linux, `libpdfium.dylib` on macOS, `pdfium.dll`
+/// on Windows) — a thin re-export of `pdfium-render`'s own
+/// `Pdfium::pdfium_platform_library_name()` so callers that depend on
+/// `pdf_core` (like `app/src-tauri`) don't need a direct `pdfium-render`
+/// dependency just to build a correct, cross-platform path to the fetched
+/// binary (see `crates/pdf_engine_spike/README.md`). Every dev-only
+/// `libpdfium` path in this workspace was hardcoded to the `.so` filename
+/// until this existed, which meant only Linux could actually find the
+/// library it fetched.
+pub fn platform_library_filename() -> std::ffi::OsString {
+    pdfium_render::prelude::Pdfium::pdfium_platform_library_name()
+}
+
 pub struct PdfiumEngine {
     pdfium: pdfium_render::prelude::Pdfium,
 }
@@ -207,9 +336,16 @@ impl PdfiumEngine {
 impl PdfEngine for PdfiumEngine {
     type Document<'e> = PdfiumDocument<'e>;
 
-    fn open<'e>(&'e self, path: &Path) -> Result<Self::Document<'e>, PdfCoreError> {
-        let document = self.pdfium.load_pdf_from_file(path, None)?;
-        Ok(PdfiumDocument { document })
+    fn open<'e>(&'e self, path: &Path, password: Option<&'e str>) -> Result<Self::Document<'e>, PdfCoreError> {
+        use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
+
+        match self.pdfium.load_pdf_from_file(path, password) {
+            Ok(document) => Ok(PdfiumDocument { document }),
+            Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {
+                Err(PdfCoreError::PasswordRequired)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -267,6 +403,68 @@ impl<'e> PdfDocument for PdfiumDocument<'e> {
         self.document.save_to_file(path)?;
         Ok(())
     }
+
+    fn flatten_page_with_annotations(
+        &mut self,
+        page_index: usize,
+        annotations: &[FlattenAnnotation],
+    ) -> Result<(), PdfCoreError> {
+        use pdfium_render::prelude::{
+            PdfColor, PdfPageObjectCommon, PdfPageObjectsCommon, PdfPagePathObject, PdfPoints,
+        };
+
+        // Fetched before `page` below rather than per-`Text` annotation:
+        // `fonts_mut()` needs `&mut self.document`, and doing this first
+        // (extracting just an owned, Copy `PdfFontToken`) means the loop
+        // afterwards only ever needs `&self.document`, which coexists fine
+        // with holding `page` at the same time.
+        let font = self.document.fonts_mut().helvetica();
+
+        let mut page = self
+            .document
+            .pages()
+            .get(page_index as u16)
+            .map_err(|_| PdfCoreError::PageIndexOutOfRange(page_index))?;
+
+        for annotation in annotations {
+            match annotation {
+                FlattenAnnotation::Path { points, closed, stroke_rgb, stroke_width_pt } => {
+                    let Some((&(x0, y0), rest)) = points.split_first() else {
+                        continue;
+                    };
+                    let color = PdfColor::new(stroke_rgb.0, stroke_rgb.1, stroke_rgb.2, 255);
+                    let mut path = PdfPagePathObject::new(
+                        &self.document,
+                        PdfPoints::new(x0),
+                        PdfPoints::new(y0),
+                        Some(color),
+                        Some(PdfPoints::new(*stroke_width_pt)),
+                        None,
+                    )?;
+                    for &(x, y) in rest {
+                        path.line_to(PdfPoints::new(x), PdfPoints::new(y))?;
+                    }
+                    if *closed {
+                        path.close_path()?;
+                    }
+                    page.objects_mut().add_path_object(path)?;
+                }
+                FlattenAnnotation::Text { x, y, text, font_size_pt, rgb } => {
+                    let mut object = page.objects_mut().create_text_object(
+                        PdfPoints::new(*x),
+                        PdfPoints::new(*y),
+                        text.as_str(),
+                        font,
+                        PdfPoints::new(*font_size_pt),
+                    )?;
+                    object.set_fill_color(PdfColor::new(rgb.0, rgb.1, rgb.2, 255))?;
+                }
+            }
+        }
+
+        page.flatten()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -275,19 +473,39 @@ mod tests {
     use std::path::PathBuf;
 
     fn spike_lib_path() -> PathBuf {
-        // Reuses the same downloaded libpdfium.so as crates/pdf_engine_spike
+        // Reuses the same downloaded pdfium binary as crates/pdf_engine_spike
         // (see that crate's README for how to fetch it) rather than
-        // duplicating the binary.
+        // duplicating it. Filename is platform-dependent (`libpdfium.so` /
+        // `.dylib` / `pdfium.dll`) — see `platform_library_filename()`.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("pdf_engine_spike/lib/libpdfium.so")
+            .join("pdf_engine_spike/lib")
+            .join(platform_library_filename())
     }
 
     fn sample_pdf_path() -> Option<PathBuf> {
         let candidate =
             PathBuf::from("/home/naveen/learn road map/UIUX-Exact-10-Day-Roadmap.md.pdf");
         candidate.exists().then_some(candidate)
+    }
+
+    /// Serializes every test below that constructs a real `PdfiumEngine`
+    /// (there were already 4 before this pass added 3 more). Discovered
+    /// while adding this module's new flatten/export tests: `cargo test -p
+    /// pdf_core` runs tests in parallel threads by default, and two
+    /// `PdfiumEngine::new()` calls alive at the same time in one process is
+    /// exactly the deadlock `crates/pdf_engine_spike/README.md` already
+    /// documents (a second PDFium binding in the same process deadlocks) —
+    /// so this was already a latent flake, just unlikely enough with only 4
+    /// real-engine tests to not have been hit yet; 7 made it reliably
+    /// reproduce. A `Mutex` guard is cheaper and more durable than telling
+    /// everyone who runs this suite to remember `--test-threads=1`; the
+    /// synthetic-fake tests (`tile_cache`, `tile_grid`) don't touch this
+    /// lock and keep running in parallel.
+    fn real_engine_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     #[test]
@@ -302,8 +520,9 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         assert_eq!(document.page_count(), 7);
         let (width, height) = document.page_size(0).unwrap();
@@ -317,6 +536,36 @@ mod tests {
         assert!(png_bytes.starts_with(&[0x89, b'P', b'N', b'G']));
     }
 
+    /// SEC-01. Fixture committed at `tests/fixtures/encrypted.pdf` (a
+    /// single blank page, user+owner password `secret123`, generated with
+    /// `pypdf`) rather than gated on a machine-specific
+    /// `sample_pdf_path()` — unlike the rest of this module's real-engine
+    /// tests, this one doesn't depend on anything outside the repo besides
+    /// `libpdfium.so` itself.
+    #[test]
+    fn opening_an_encrypted_pdf_requires_the_correct_password() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let encrypted_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted.pdf");
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+
+        assert!(matches!(engine.open(&encrypted_path, None), Err(PdfCoreError::PasswordRequired)));
+        assert!(matches!(
+            engine.open(&encrypted_path, Some("wrong-password")),
+            Err(PdfCoreError::PasswordRequired)
+        ));
+
+        let document = engine
+            .open(&encrypted_path, Some("secret123"))
+            .expect("the correct password should open the document");
+        assert_eq!(document.page_count(), 1);
+    }
+
     #[test]
     fn tile_grid_covers_full_zoomed_page_with_partial_edge_tiles() {
         // 1000x700 at 256px tiles: 4 cols (3*256=768 < 1000 <= 4*256=1024),
@@ -324,6 +573,63 @@ mod tests {
         assert_eq!(tile_grid(1000, 700, 256), (4, 3));
         // Exact multiples shouldn't add a spurious extra tile.
         assert_eq!(tile_grid(1024, 768, 256), (4, 3));
+    }
+
+    fn encode_png(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn comparison_overlay_highlights_only_the_changed_region() {
+        // Mid-tone background (not pure white) so "faded toward white" is
+        // actually observable on the unchanged pixels below.
+        let background = image::Rgba([40u8, 110, 180, 255]);
+        let black = image::Rgba([0u8, 0, 0, 255]);
+
+        let mut base = image::RgbaImage::new(4, 4);
+        for pixel in base.pixels_mut() {
+            *pixel = background;
+        }
+        let mut revised = base.clone();
+        revised.put_pixel(1, 1, black); // one changed pixel
+
+        let overlay_png = render_comparison_overlay(&encode_png(&base), &encode_png(&revised)).unwrap();
+        let overlay = image::load_from_memory(&overlay_png).unwrap().to_rgba8();
+
+        assert_eq!(overlay.dimensions(), (4, 4));
+        let changed = overlay.get_pixel(1, 1);
+        assert_eq!(changed.0[..3], [230, 30, 30]); // highlight color, alpha ignored
+
+        // An unchanged pixel is faded toward white, not left untouched or
+        // highlighted.
+        let unchanged = overlay.get_pixel(0, 0);
+        assert_ne!(unchanged, &background);
+        assert_ne!(unchanged.0[..3], [230, 30, 30]);
+    }
+
+    #[test]
+    fn comparison_overlay_is_blank_when_nothing_changed() {
+        let mut image_buf = image::RgbaImage::new(3, 3);
+        for pixel in image_buf.pixels_mut() {
+            *pixel = image::Rgba([100, 150, 200, 255]);
+        }
+        let png = encode_png(&image_buf);
+
+        let overlay_png = render_comparison_overlay(&png, &png).unwrap();
+        let overlay = image::load_from_memory(&overlay_png).unwrap().to_rgba8();
+        for pixel in overlay.pixels() {
+            assert_ne!(pixel.0[..3], [230, 30, 30]);
+        }
+    }
+
+    #[test]
+    fn comparison_overlay_rejects_mismatched_dimensions() {
+        let a = image::RgbaImage::new(4, 4);
+        let b = image::RgbaImage::new(4, 5);
+        let err = render_comparison_overlay(&encode_png(&a), &encode_png(&b)).unwrap_err();
+        assert!(matches!(err, PdfCoreError::ComparisonDimensionMismatch { .. }));
     }
 
     #[test]
@@ -338,8 +644,9 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         // Page is 612x792 pt (US Letter); zoom to 900px wide so height > 900
         // too, guaranteeing a multi-tile grid at tile_size 256.
@@ -383,8 +690,9 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         let full = document.render_page_to_png(0, 800).unwrap();
         let full_image = image::load_from_memory(&full).unwrap();
@@ -395,6 +703,112 @@ mod tests {
         assert_eq!(thumb_image.width(), 100);
         let thumb_aspect = thumb_image.width() as f64 / thumb_image.height() as f64;
         assert!((full_aspect - thumb_aspect).abs() < 0.01);
+    }
+
+    #[test]
+    fn flatten_page_with_annotations_changes_the_rendered_page() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
+
+        let before = document.render_page_to_png(0, 400).unwrap();
+
+        document
+            .flatten_page_with_annotations(
+                0,
+                &[
+                    FlattenAnnotation::Path {
+                        points: vec![(50.0, 50.0), (200.0, 50.0), (200.0, 150.0), (50.0, 150.0)],
+                        closed: true,
+                        stroke_rgb: (255, 0, 0),
+                        stroke_width_pt: 3.0,
+                    },
+                    FlattenAnnotation::Text {
+                        x: 60.0,
+                        y: 160.0,
+                        text: "exported".to_string(),
+                        font_size_pt: 18.0,
+                        rgb: (0, 0, 255),
+                    },
+                ],
+            )
+            .expect("flattening with annotations should succeed");
+
+        let after = document.render_page_to_png(0, 400).unwrap();
+        assert_ne!(before, after, "flattened annotations should change the rendered page");
+    }
+
+    #[test]
+    fn flatten_page_with_annotations_out_of_range_page_is_a_typed_error() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
+
+        let err = document
+            .flatten_page_with_annotations(9999, &[])
+            .expect_err("out-of-range page index should error");
+        assert!(matches!(err, PdfCoreError::PageIndexOutOfRange(9999)));
+    }
+
+    #[test]
+    fn flattened_export_saves_and_reopens_with_the_same_page_count() {
+        let lib_path = spike_lib_path();
+        if !lib_path.exists() {
+            eprintln!("skipping: libpdfium.so not present at {lib_path:?} (see crates/pdf_engine_spike/README.md)");
+            return;
+        }
+        let Some(pdf_path) = sample_pdf_path() else {
+            eprintln!("skipping: sample PDF not present on this machine");
+            return;
+        };
+
+        let _guard = real_engine_test_lock().lock().unwrap();
+        let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
+        let mut document = engine.open(&pdf_path, None).expect("document should open");
+        let original_page_count = document.page_count();
+
+        document
+            .flatten_page_with_annotations(
+                0,
+                &[FlattenAnnotation::Path {
+                    points: vec![(10.0, 10.0), (100.0, 100.0)],
+                    closed: false,
+                    stroke_rgb: (0, 255, 0),
+                    stroke_width_pt: 5.0,
+                }],
+            )
+            .unwrap();
+
+        let out_path = std::env::temp_dir().join(format!(
+            "pdf_core_flatten_export_test_{}.pdf",
+            std::process::id()
+        ));
+        document.save(&out_path).expect("save should succeed");
+
+        let reopened = engine.open(&out_path, None).expect("flattened export should reopen");
+        assert_eq!(reopened.page_count(), original_page_count);
+
+        let _ = std::fs::remove_file(&out_path);
     }
 
     /// A `PdfDocument` test double that fabricates a solid-color PNG instead
@@ -495,8 +909,9 @@ mod tests {
             return;
         };
 
+        let _guard = real_engine_test_lock().lock().unwrap();
         let engine = PdfiumEngine::new(&lib_path).expect("engine should initialize");
-        let document = engine.open(&pdf_path).expect("document should open");
+        let document = engine.open(&pdf_path, None).expect("document should open");
 
         assert!(matches!(
             document.page_size(9999),

@@ -192,3 +192,83 @@ Section 6 ("do not build multiple phases on top of a PDF engine that has
 failed a required validation"), this isn't a failure, but it is an open
 risk — Phase 2 (PDF Core) rendering-performance work should not be
 considered de-risked until a real sample is tested.
+
+## Update — 2026-09-14: VIEW-04 synthetic validation (still not the real thing)
+
+With every other feature-registry row closed (SEC-03, then RFI-04 as the
+first Backlog item), the only remaining open MVP row was VIEW-04 — exactly
+the "#3 SKIPPED" gap the spike results above already called out. Still no
+real MDS Rebar drawing available in this environment, so rather than leave
+it SKIPPED indefinitely, built a synthetic stand-in and measured against
+it: `crates/pdf_core/tests/large_pdf_performance.rs`, a 30-page, ARCH-D-sized
+(2592x1728pt) PDF generated at test time (raw PDF bytes written directly —
+no PDF-authoring dependency existed in this workspace, and adding one for a
+test fixture wasn't justified), ~1200 independently-stroked line segments
+plus ~80 text labels per page, meant to approximate a rebar placement
+sheet's line/label density. **This is explicitly not a substitute for a
+real drawing** — no title block, no real geometry, no embedded raster
+images, no complex path fills/gradients a real CAD export might have — only
+a stand-in that can't be mistaken for the genuine Section 6 requirement,
+which is still open and still needs Naveen to supply a real sample.
+
+What it's good for regardless: catching a *catastrophic* degradation (not
+just a slow one) in the render/tile pipeline as page count and path density
+scale up, which no test in this workspace exercised before now (every
+existing `pdf_core` real-engine test uses a single small page).
+
+**First run, `cargo test -p pdf_core` (this workspace's normal invocation,
+debug build): looked alarming** — 2.6-6.9s per full-page render at 1600px,
+~13s per tile (512px tile, 2x zoom), 204s to render 16 tiles. That's
+unusable for interactive zoom/pan, and briefly looked like confirmation
+that the crate's own documented "re-rasterizes the whole page per tile,
+not the performance win tiling is meant to provide" caveat was a real,
+severe blocker.
+
+**Re-run under `cargo test -p pdf_core --release`: not a real problem, a
+debug-build artifact.** Same test, same synthetic PDF, only the build
+profile changed: page 0 rendered in 4.27s (a one-time warm-up cost, see
+below), but every page after that rendered in 80-85ms; tiles averaged
+~250ms each. That's a **~30-50x gap** between debug and release, almost
+certainly the `image` crate's PNG encode/decode/crop path (which
+`render_tile_to_png`'s default implementation runs on every call) being
+far more expensive unoptimized than PDFium's own (already-compiled-release)
+rendering call. **This means the first run's numbers were misleading, not
+wrong** — they're real debug-build timings, just not representative of
+what a compiled Tauri release binary will do. Lesson recorded directly in
+the test file's own doc comment so a future debug-mode run of this same
+test doesn't cause the same false alarm again.
+
+One more real, worth-keeping finding from the release run: the *first*
+full-page render call in a process took 4.27s even in release mode; every
+subsequent render (including of different pages) was 80-85ms. This reads
+like a one-time PDFium/font/cache warm-up cost, not a per-page cost — worth
+a real app calling one throwaway render during startup (or accepting one
+slow first page-open) rather than assuming later pages will be equally
+slow. Not investigated further this pass (would need profiling PDFium
+itself, not just this crate, to say what specifically warms up).
+
+**Numbers this run does support** (release-mode, synthetic PDF, all
+figures approximate):
+- Full-page render at 1600px target width: ~80-85ms/page after warm-up.
+- One-time first-render warm-up cost: ~4.3s, once per process.
+- Tile render at 2x zoom, 512px tiles (existing "full-page-render-then-crop"
+  implementation, unchanged this pass): ~250ms/tile. A full 7x5=35-tile
+  grid for one page would be ~8.75s if rendered serially and completely
+  uncached — tolerable for progressive/on-demand tile loading (typical
+  viewport only needs a handful of visible tiles at once, and `TileCache`
+  makes repeat requests for the same tile effectively free — confirmed:
+  4 cached tiles served in 3.3µs vs. ~1s uncached for the same 4), not
+  something a user would notice as "broken" the way the debug-mode numbers
+  first suggested.
+
+**What this does NOT validate**: real construction-drawing content (raster
+images, gradients, complex fills, embedded fonts beyond one base-14 face,
+genuinely large page counts like 100+), correctness of the *rendered
+output* against a real drawing (only pixel-count/PNG-magic-byte checks ran,
+no human or automated visual comparison), and whether 250ms/tile remains
+acceptable once real tile-based zoom/pan interaction exists in the UI
+(VIEW-01/02 currently re-request the whole page at a new zoom width, not
+individual tiles — so this pipeline's tile path isn't actually wired to
+anything user-facing yet either). VIEW-04 stays open pending a real sample
+from Naveen; see `docs/features/FEATURE_REGISTRY.md`'s VIEW-04 row for
+current status.

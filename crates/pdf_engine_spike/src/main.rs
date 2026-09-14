@@ -4,7 +4,9 @@ use std::time::Instant;
 use pdfium_render::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let lib_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libpdfium.so");
+    let lib_path = Pdfium::pdfium_platform_library_name_at_path(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("lib"),
+    );
     let input_path = std::env::args()
         .nth(1)
         .expect("usage: pdf_engine_spike <path-to-pdf>");

@@ -63,6 +63,23 @@ expansion — flagged here per Section 26/36.
   `member`) — no formal RBAC designed yet; kept minimal until the
   collaboration model (async vs. real-time) is confirmed.
 
+## Added 2026-09-13 — Rfi (RFI-01/02)
+
+| Table | Fields |
+|---|---|
+| Rfi | id, document_id, page_id, markup_id, number, title, description, status, response, created_by, created_at, updated_at |
+
+- `page_id`/`markup_id` are both nullable and independent —
+  `ON DELETE SET NULL` on both, so deleting the page/markup an RFI pointed
+  at doesn't cascade-delete the RFI (the question/answer trail outlives the
+  drawing element it was raised against).
+- `number` is sequential per `document_id` (`UNIQUE (document_id, number)`),
+  assigned as `MAX(number) + 1` at insert time — so RFIs can be referred to
+  the way they are on a real job site ("RFI #14"), not by opaque id.
+- `status` is a plain text field (`open`/`answered`/`closed`, matching
+  RFI-02's three states from the master list) — no state machine enforced
+  at the DB layer; `response` holds the answer text once one exists.
+
 ## Implementation status
 
 Initial migration (`crates/mds_db/migrations/0001_initial.sql`) implements
@@ -72,6 +89,35 @@ keys, `FOREIGN KEY` constraints, `ON DELETE CASCADE` for `Page → Markup` and
 `cargo test` that runs the migration against an in-memory SQLite database
 and asserts every table exists — see `crates/mds_db/src/lib.rs`.
 
+A second migration, `0002_add_rfi.sql`, exists purely to repair databases
+that reached schema version 1 before `rfi` was added — see that file's own
+comment and **"Migrations are additive from here on"** below for why. New
+tables from now on always get their own migration file, never an edit to
+an already-applied one.
+
 Not yet designed: indexes beyond FK columns (deferred until real query
 patterns are known), and the FTS5 schema (deferred until OCR/search is
 built, per the build prompt).
+
+## Migrations are additive from here on (found 2026-09-13)
+
+`rfi` was originally added by editing `0001_initial.sql` directly, on the
+reasoning that "this project has no deployed instances yet, so there's no
+migration history to preserve." That reasoning was wrong in a way only
+running the real app against a real, already-existing local database
+caught: `rusqlite_migration` tracks progress as `PRAGMA user_version`, not
+by diffing SQL text, and a local database from earlier the same day had
+already reached `user_version = 1` — before `rfi` existed. Every run since
+then silently skipped 0001 entirely (already "applied") and the `rfi`
+table was simply never created; the app's own `cargo test` suite never
+caught this because it always migrates a fresh `:memory:` database, never
+one that already exists at an earlier version.
+
+Fixed by adding `0002_add_rfi.sql` (`CREATE TABLE IF NOT EXISTS`, safe
+whether or not 0001 already created it) and repairing the affected local
+database directly. A regression test
+(`to_latest_adds_rfi_to_a_database_stuck_at_version_1` in
+`crates/mds_db/src/lib.rs`) simulates the stuck-at-version-1 state and
+confirms `to_latest()` repairs it. From here on, a schema change is always
+a new migration file, never an edit to one that might already be applied
+somewhere.

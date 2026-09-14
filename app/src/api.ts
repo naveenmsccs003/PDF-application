@@ -118,12 +118,33 @@ export interface TakeoffItemDto {
   total_cost: number | null;
 }
 
+export type RfiStatus = "Open" | "Answered" | "Closed";
+
+export interface RfiDto {
+  id: string;
+  document_id: string;
+  page_id: string | null;
+  markup_id: string | null;
+  number: number;
+  title: string;
+  description: string | null;
+  status: RfiStatus;
+  response: string | null;
+  created_by: string | null;
+}
+
 // -- project --
 
 export const createUser = (email: string, displayName: string) =>
   invoke<UserDto>("create_user", { email, displayName });
 
 export const getUserByEmail = (email: string) => invoke<UserDto>("get_user_by_email", { email });
+
+// SEC-03: session operations, separate from the identity lookups above —
+// see `commands::project`'s module doc for why.
+export const setCurrentUser = (userId: string) => invoke<void>("set_current_user", { userId });
+
+export const signOut = () => invoke<void>("sign_out");
 
 export const createProject = (name: string, createdBy: string) =>
   invoke<ProjectDto>("create_project", { name, createdBy });
@@ -142,11 +163,51 @@ export const removeProjectMember = (projectId: string, userId: string) =>
 
 // -- document / pdf --
 
-export const importPdfDocument = (path: string, title: string, projectId: string | null) =>
-  invoke<DocumentDto>("import_pdf_document", { path, title, projectId });
+export const importPdfDocument = (path: string, title: string, projectId: string | null, password: string | null) =>
+  invoke<DocumentDto>("import_pdf_document", { path, title, projectId, password });
+
+// -- security (SEC-01/02) --
+
+export const setDocumentPdfPassword = (documentId: string, password: string) =>
+  invoke<void>("set_document_pdf_password", { documentId, password });
+
+export const clearDocumentPdfPassword = (documentId: string) =>
+  invoke<void>("clear_document_pdf_password", { documentId });
 
 export const renderPageThumbnail = (documentId: string, pageNumber: number, width: number) =>
   invoke<string>("render_page_thumbnail", { documentId, pageNumber, width });
+
+export const exportFlattenedPdf = (documentId: string, outputPath: string) =>
+  invoke<void>("export_flattened_pdf", { documentId, outputPath });
+
+export const exportHandoffPackage = (documentId: string, outputDir: string) =>
+  invoke<void>("export_handoff_package", { documentId, outputDir });
+
+// RFI-04: pixel-diff overlay between the same page in two saved revisions.
+export const compareDocumentVersions = (versionAId: string, versionBId: string, pageNumber: number, width: number) =>
+  invoke<string>("compare_document_versions", { versionAId, versionBId, pageNumber, width });
+
+export const printDocument = (documentId: string) => invoke<string>("print_document", { documentId });
+
+// -- recovery (REL-01/02) --
+
+export interface RecoverySnapshotDto {
+  id: string;
+  document_id: string;
+  snapshot_path: string;
+  created_at: string;
+}
+
+export const autosaveSnapshot = (documentId: string) =>
+  invoke<RecoverySnapshotDto>("autosave_snapshot", { documentId });
+
+export const listRecoverySnapshots = (documentId: string) =>
+  invoke<RecoverySnapshotDto[]>("list_recovery_snapshots", { documentId });
+
+export const restoreRecoverySnapshot = (id: string, outputPath: string) =>
+  invoke<void>("restore_recovery_snapshot", { id, outputPath });
+
+export const discardRecoverySnapshot = (id: string) => invoke<void>("discard_recovery_snapshot", { id });
 
 export const listDocumentsForProject = (projectId: string) =>
   invoke<DocumentDto[]>("list_documents_for_project", { projectId });
@@ -164,6 +225,9 @@ export const createDocumentVersion = (documentId: string, fileSnapshotPath: stri
 
 export const listDocumentVersions = (documentId: string) =>
   invoke<DocumentVersionDto[]>("list_document_versions", { documentId });
+
+export const saveDocumentRevision = (documentId: string, createdBy: string | null) =>
+  invoke<DocumentVersionDto>("save_document_revision", { documentId, createdBy });
 
 // -- markup --
 
@@ -196,6 +260,19 @@ export const listMarkupComments = (markupId: string) =>
   invoke<MarkupCommentDto[]>("list_markup_comments", { markupId });
 
 export const deleteMarkupComment = (id: string) => invoke<void>("delete_markup_comment", { id });
+
+// -- markup undo/redo (MARK-06) --
+
+export interface UndoStatusDto {
+  can_undo: boolean;
+  can_redo: boolean;
+}
+
+export const undoMarkup = (pageId: string) => invoke<boolean>("undo_markup", { pageId });
+
+export const redoMarkup = (pageId: string) => invoke<boolean>("redo_markup", { pageId });
+
+export const markupUndoStatus = (pageId: string) => invoke<UndoStatusDto>("markup_undo_status", { pageId });
 
 // -- measurement --
 
@@ -260,3 +337,22 @@ export const updateTakeoffItem = (
 export const deleteTakeoffItem = (id: string) => invoke<void>("delete_takeoff_item", { id });
 
 export const exportTakeoffCsv = (documentId: string) => invoke<string>("export_takeoff_csv", { documentId });
+
+export const exportTakeoffXlsx = (documentId: string, outputPath: string) =>
+  invoke<void>("export_takeoff_xlsx", { documentId, outputPath });
+
+// -- rfi --
+
+export const createRfi = (
+  documentId: string,
+  pageId: string | null,
+  markupId: string | null,
+  title: string,
+  description: string | null,
+  createdBy: string | null,
+) => invoke<RfiDto>("create_rfi", { documentId, pageId, markupId, title, description, createdBy });
+
+export const listRfisForDocument = (documentId: string) => invoke<RfiDto[]>("list_rfis_for_document", { documentId });
+
+export const setRfiStatus = (id: string, status: RfiStatus, response: string | null) =>
+  invoke<void>("set_rfi_status", { id, status, response });

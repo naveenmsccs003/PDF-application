@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
+import { ProductTour, hasTourBeenSeen } from "./Tour";
 import type {
   DocumentDto,
+  DocumentVersionDto,
   MarkupCommentDto,
   MarkupDto,
   MarkupType,
@@ -11,29 +14,13 @@ import type {
   Point,
   ProjectDto,
   ProjectMemberDto,
+  RfiDto,
+  RfiStatus,
   ScaleDto,
   TakeoffItemDto,
   UserDto,
 } from "./api";
 import "./App.css";
-
-/** Parses "x,y" into a Point. Throws (caller shows the error) on bad input. */
-function parsePoint(input: string): Point {
-  const parts = input.split(",").map((s) => Number(s.trim()));
-  if (parts.length !== 2 || parts.some((n) => Number.isNaN(n))) {
-    throw new Error(`expected "x,y", got "${input}"`);
-  }
-  return [parts[0], parts[1]];
-}
-
-/** Parses "x1,y1 x2,y2 ..." into Point[]. */
-function parsePoints(input: string): Point[] {
-  return input
-    .trim()
-    .split(/\s+/)
-    .filter((s) => s.length > 0)
-    .map(parsePoint);
-}
 
 function ErrorBanner({ error, onDismiss }: { error: string | null; onDismiss: () => void }) {
   if (!error) return null;
@@ -55,6 +42,12 @@ export default function App() {
     }
   };
 
+  // -- first-time user tour --
+  const [tourOpen, setTourOpen] = useState(false);
+  useEffect(() => {
+    if (!hasTourBeenSeen()) setTourOpen(true);
+  }, []);
+
   // -- identity --
   const [user, setUser] = useState<UserDto | null>(null);
   const [emailInput, setEmailInput] = useState("");
@@ -62,11 +55,24 @@ export default function App() {
 
   const signIn = () =>
     runAction(async () => {
+      let signedIn: UserDto;
       try {
-        setUser(await api.getUserByEmail(emailInput));
+        signedIn = await api.getUserByEmail(emailInput);
       } catch {
-        setUser(await api.createUser(emailInput, nameInput || emailInput));
+        signedIn = await api.createUser(emailInput, nameInput || emailInput);
       }
+      // SEC-03: a separate explicit step from the lookup above, since
+      // `getUserByEmail` is also used (unrelated to sign-in) to resolve a
+      // teammate's id when inviting them to a project — see
+      // `commands::project`'s module doc.
+      await api.setCurrentUser(signedIn.id);
+      setUser(signedIn);
+    });
+
+  const signOut = () =>
+    runAction(async () => {
+      await api.signOut();
+      setUser(null);
     });
 
   // -- projects --
@@ -83,14 +89,23 @@ export default function App() {
 
   return (
     <main className="app">
-      <h1>MDS Rebar — Backend Control Panel</h1>
-      <p className="subtitle">
-        Working UI over the real IPC layer (not mockups) — every action here calls into
-        the Rust domain crates via Tauri commands. The page view renders the actual PDF
-        and supports click-to-draw markup (rectangle/line/arrow/cloud/text); everything
-        else (projects, measurement, takeoff) is still a functional control panel rather
-        than a polished editor. Zoom/pan and shape select/move/resize aren't built yet.
-      </p>
+      <div className="app-header-row">
+        <div>
+          <h1>MDS Rebar — Backend Control Panel</h1>
+          <p className="subtitle">
+            Working UI over the real IPC layer (not mockups) — every action here calls into
+            the Rust domain crates via Tauri commands. The page view renders the actual PDF
+            and supports click-to-draw markup (rectangle/line/arrow/cloud/text), select/move/
+            resize on existing shapes, scale calibration/length/area/count measurement, and
+            zoom/pan, all drawn directly on the canvas; projects and takeoff are still a
+            functional control panel rather than a polished editor.
+          </p>
+        </div>
+        <button className="tour-trigger" onClick={() => setTourOpen(true)}>
+          Take the tour
+        </button>
+      </div>
+      <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
       {!user ? (
@@ -109,7 +124,7 @@ export default function App() {
             <h2>
               Signed in as {user.display_name} <span className="muted">({user.email})</span>
             </h2>
-            <button onClick={() => setUser(null)}>Sign out</button>
+            <button onClick={signOut}>Sign out</button>
           </section>
 
           <ProjectsPanel
@@ -231,7 +246,7 @@ function ProjectsPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Documents (DOC-01/02/04/05)
+// Documents (DOC-01/03/04/05)
 // ---------------------------------------------------------------------------
 
 function DocumentsPanel({
@@ -249,6 +264,8 @@ function DocumentsPanel({
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [importTitle, setImportTitle] = useState("");
+  const [importPassword, setImportPassword] = useState("");
+  const [documentPasswordDraft, setDocumentPasswordDraft] = useState("");
 
   const reloadDocuments = () =>
     runAction(async () => setDocuments(await api.listDocumentsForProject(project.id)));
@@ -280,6 +297,10 @@ function DocumentsPanel({
       setThumbnails({});
     }
     setSelectedPageId(null);
+    // A password typed for the previous document must not survive the
+    // switch — otherwise clicking Save after switching documents would
+    // apply the old document's typed password to the new one.
+    setDocumentPasswordDraft("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDocumentId]);
 
@@ -289,10 +310,23 @@ function DocumentsPanel({
       if (!path || typeof path !== "string") return;
       const filename = path.split("/").pop() ?? path;
       const title = importTitle || filename;
-      const doc = await api.importPdfDocument(path, title, project.id);
+      const doc = await api.importPdfDocument(path, title, project.id, importPassword || null);
       await reloadDocuments();
       setSelectedDocumentId(doc.id);
       setImportTitle("");
+      setImportPassword("");
+    });
+
+  const setDocumentPassword = (doc: DocumentDto) =>
+    runAction(async () => {
+      if (!documentPasswordDraft) return;
+      await api.setDocumentPdfPassword(doc.id, documentPasswordDraft);
+      setDocumentPasswordDraft("");
+    });
+
+  const clearDocumentPassword = (doc: DocumentDto) =>
+    runAction(async () => {
+      await api.clearDocumentPdfPassword(doc.id);
     });
 
   const rotatePage = (page: PageDto) =>
@@ -304,10 +338,37 @@ function DocumentsPanel({
 
   const selectedDocument = documents.find((d) => d.id === selectedDocumentId) ?? null;
   const selectedPage = pages.find((p) => p.id === selectedPageId) ?? null;
+  const closeDocument = () => setSelectedDocumentId(null);
+
+  const exportFlattenedPdf = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        defaultPath: `${selectedDocument.title}-flattened.pdf`,
+      });
+      if (!outputPath) return;
+      await api.exportFlattenedPdf(selectedDocument.id, outputPath);
+    });
+
+  const exportHandoffPackage = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const outputDir = await openFileDialog({ directory: true, multiple: false });
+      if (!outputDir || typeof outputDir !== "string") return;
+      await api.exportHandoffPackage(selectedDocument.id, outputDir);
+    });
+
+  const printDocument = () =>
+    runAction(async () => {
+      if (!selectedDocument) return;
+      const path = await api.printDocument(selectedDocument.id);
+      await openPath(path);
+    });
 
   return (
     <section className="card">
-      <h2>Documents (DOC-01/04/05)</h2>
+      <h2>Documents (DOC-01/03/04/05)</h2>
       <div className="row">
         <select value={selectedDocumentId ?? ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)}>
           <option value="">— select a document —</option>
@@ -317,9 +378,35 @@ function DocumentsPanel({
             </option>
           ))}
         </select>
+        {selectedDocument && <button onClick={closeDocument}>Close document</button>}
+        {selectedDocument && <button onClick={exportFlattenedPdf}>Export flattened PDF…</button>}
+        {selectedDocument && <button onClick={exportHandoffPackage}>Export handoff package…</button>}
+        {selectedDocument && <button onClick={printDocument}>Print…</button>}
         <input placeholder="title for imported PDF (optional)" value={importTitle} onChange={(e) => setImportTitle(e.target.value)} />
+        <input
+          type="password"
+          placeholder="PDF password (if encrypted)"
+          value={importPassword}
+          onChange={(e) => setImportPassword(e.target.value)}
+        />
         <button onClick={importPdf}>Import PDF…</button>
       </div>
+
+      {selectedDocument && (
+        <div className="row">
+          <span className="muted">PDF password (SEC-01/02, stored in the OS keychain):</span>
+          <input
+            type="password"
+            placeholder="set/update password"
+            value={documentPasswordDraft}
+            onChange={(e) => setDocumentPasswordDraft(e.target.value)}
+          />
+          <button onClick={() => setDocumentPassword(selectedDocument)} disabled={!documentPasswordDraft}>
+            Save
+          </button>
+          <button onClick={() => clearDocumentPassword(selectedDocument)}>Clear stored password</button>
+        </div>
+      )}
 
       {selectedDocument && (
         <div className="nested">
@@ -350,6 +437,12 @@ function DocumentsPanel({
           {selectedPage && <PagePanel page={selectedPage} user={user} runAction={runAction} />}
 
           <TakeoffPanel document={selectedDocument} runAction={runAction} />
+
+          <RfiPanel document={selectedDocument} pages={pages} user={user} runAction={runAction} />
+
+          <RecoveryPanel document={selectedDocument} runAction={runAction} />
+
+          <DocumentVersionsPanel document={selectedDocument} user={user} runAction={runAction} />
         </div>
       )}
     </section>
@@ -357,19 +450,34 @@ function DocumentsPanel({
 }
 
 // ---------------------------------------------------------------------------
-// PDF page canvas — click-to-draw markup over the real rendered page
-// (VIEW-01/02, MARK-01–04). Page-space coordinates are pixels-at-RENDER_WIDTH
-// scaled by page.width/RENDER_WIDTH, so they stay in the same "page unit"
-// space the manual measurement inputs below already use (page.width/height,
-// as reported by PageDto, are PDF points) — consistent within this app even
-// though the y-axis here is image-top-down rather than PDF's native
-// bottom-up, since nothing yet round-trips these coordinates through a real
-// PDF export.
+// PDF page canvas — click-to-draw markup, select/move/resize, scale
+// calibration/length/area/count measurement, zoom, and pan, all over the
+// real rendered page (VIEW-01/02, MARK-01–04, MEAS-01–07). Page-space
+// coordinates are pixels-at-renderWidth (RENDER_WIDTH * zoom) scaled by
+// page.width/renderWidth, i.e. real PDF points (page.width/height, as
+// reported by PageDto, are PDF points) — so a calibration/measurement taken
+// here is in the same coordinate space as the page itself, not an arbitrary
+// unit, regardless of the current zoom level. The y-axis stays
+// image-top-down rather than PDF's native bottom-up, since nothing yet
+// round-trips these coordinates through a real PDF export. Zoom re-requests
+// the thumbnail at the zoomed pixel width (same `render_page_thumbnail` IPC
+// command, just a different `width`); pan is native scroll on a
+// fixed-size viewport, plus a dedicated "Pan" tool for click-drag scrolling.
 // ---------------------------------------------------------------------------
 
 const RENDER_WIDTH = 900;
+const VIEWPORT_MAX_HEIGHT = 700;
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 3;
+const ZOOM_STEP = 0.25;
 
-type DrawTool = "select" | MarkupType;
+type MeasureTool = "Calibrate" | "Length" | "Area" | "Count";
+type DrawTool = "select" | "pan" | MarkupType | MeasureTool;
+type SelectRequest = { id: string; nonce: number };
+
+const MARKUP_DRAW_TOOLS: MarkupType[] = ["Rectangle", "Line", "Arrow", "Cloud", "Text"];
+const CLICK_ACCUMULATE_TOOLS: DrawTool[] = ["Cloud", "Area", "Count"];
+const DRAG_PAIR_TOOLS: DrawTool[] = ["Rectangle", "Line", "Arrow", "Length", "Calibrate"];
 
 function minPointsFor(type: MarkupType): number {
   if (type === "Text") return 1;
@@ -377,37 +485,112 @@ function minPointsFor(type: MarkupType): number {
   return 2;
 }
 
+/** Smallest axis-aligned box containing every point, in page space. */
+function boundingBox(points: Point[]): { minX: number; minY: number; maxX: number; maxY: number } {
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+}
+
+/** Point-in-shape hit test in page space, generous enough for thin lines/text. */
+function hitTest(m: MarkupDto, p: Point, tolerancePageUnits: number): boolean {
+  const pts = m.geometry.points;
+  if (m.markup_type === "Text") {
+    const [tx, ty] = pts[0];
+    return Math.abs(p[0] - tx) < tolerancePageUnits * 6 && Math.abs(p[1] - ty) < tolerancePageUnits * 3;
+  }
+  if (m.markup_type === "Line" || m.markup_type === "Arrow") {
+    const [[x1, y1], [x2, y2]] = pts;
+    const len2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - x1) * (x2 - x1) + (p[1] - y1) * (y2 - y1)) / len2));
+    const cx = x1 + t * (x2 - x1);
+    const cy = y1 + t * (y2 - y1);
+    return Math.hypot(p[0] - cx, p[1] - cy) < tolerancePageUnits;
+  }
+  // Rectangle/Cloud: bounding-box test is good enough at this pass's fidelity.
+  const box = boundingBox(pts);
+  return p[0] >= box.minX - tolerancePageUnits && p[0] <= box.maxX + tolerancePageUnits && p[1] >= box.minY - tolerancePageUnits && p[1] <= box.maxY + tolerancePageUnits;
+}
+
+/**
+ * Points a shape exposes as draggable resize handles, in page space — index
+ * matches `geometry.points` so a drag can write straight back to one entry.
+ * Rectangle is stored as two diagonal corners (same pair the drag-to-draw
+ * gesture produces), so dragging either one resizes it the same way drawing
+ * did. Cloud/Text return none: multi-point cloud editing and text have no
+ * single-corner resize that makes sense at this pass's scope — move only.
+ */
+function resizeHandles(m: MarkupDto): Point[] {
+  if (m.markup_type === "Line" || m.markup_type === "Arrow" || m.markup_type === "Rectangle") {
+    return m.geometry.points;
+  }
+  return [];
+}
+
 function PdfCanvas({
   page,
   markups,
+  measurements,
+  scale: pageScale,
   user,
   onCreated,
+  onScaleChanged,
+  onMeasurementCreated,
   runAction,
+  onSelectionChange,
+  selectRequest,
 }: {
   page: PageDto;
   markups: MarkupDto[];
+  measurements: MeasurementDto[];
+  scale: ScaleDto | null;
   user: UserDto;
   onCreated: () => void;
+  onScaleChanged: (scale: ScaleDto) => void;
+  onMeasurementCreated: () => void;
   runAction: (fn: () => Promise<void>) => Promise<void>;
+  onSelectionChange: (id: string | null) => void;
+  selectRequest: SelectRequest | null;
 }) {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [tool, setTool] = useState<DrawTool>("select");
   const [color, setColor] = useState("#e53935");
+  const [lengthUnit, setLengthUnit] = useState<api.LengthUnitCode>("ft");
+  const [areaUnit, setAreaUnit] = useState<api.AreaUnitCode>("sq_ft");
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
-  const [cloudPoints, setCloudPoints] = useState<Point[]>([]);
+  const [clickPoints, setClickPoints] = useState<Point[]>([]);
   const [pendingTextPoint, setPendingTextPoint] = useState<Point | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState("");
+  const [pendingCalibration, setPendingCalibration] = useState<{ p1: Point; p2: Point } | null>(null);
+  const [pendingCalibrationInches, setPendingCalibrationInches] = useState("");
+  const calibrationInFlightRef = useRef(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [moveState, setMoveState] = useState<{ id: string; originPoints: Point[]; startPointer: Point } | null>(null);
+  const [resizeState, setResizeState] = useState<{ id: string; pointIndex: number } | null>(null);
+  const [livePoints, setLivePoints] = useState<Point[] | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [panState, setPanState] = useState<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(
+    null,
+  );
   const svgRef = useRef<SVGSVGElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
 
-  const renderedHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
-  const scale = page.width > 0 ? page.width / RENDER_WIDTH : 1;
+  const baseHeight = page.width > 0 ? (RENDER_WIDTH * page.height) / page.width : RENDER_WIDTH;
+  const viewportHeight = Math.min(baseHeight, VIEWPORT_MAX_HEIGHT);
+  const renderWidth = RENDER_WIDTH * zoom;
+  const renderedHeight = page.width > 0 ? (renderWidth * page.height) / page.width : renderWidth;
+  const scale = page.width > 0 ? page.width / renderWidth : 1;
+
+  const zoomIn = () => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(2)));
+  const zoomOut = () => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(2)));
+  const zoomReset = () => setZoom(1);
 
   useEffect(() => {
     let cancelled = false;
     setImageUri(null);
     api
-      .renderPageThumbnail(page.document_id, page.page_number, RENDER_WIDTH)
+      .renderPageThumbnail(page.document_id, page.page_number, Math.round(renderWidth))
       .then((uri) => {
         if (!cancelled) setImageUri(uri);
       })
@@ -417,7 +600,25 @@ function PdfCanvas({
     return () => {
       cancelled = true;
     };
-  }, [page.id, page.document_id, page.page_number]);
+  }, [page.id, page.document_id, page.page_number, renderWidth]);
+
+  const updateSelection = (id: string | null) => {
+    setSelectedId(id);
+    onSelectionChange(id);
+  };
+
+  useEffect(() => {
+    if (!selectRequest) return;
+    setTool("select");
+    updateSelection(selectRequest.id);
+    setClickPoints([]);
+    setPendingTextPoint(null);
+    setPendingCalibration(null);
+    setMoveState(null);
+    setResizeState(null);
+    setLivePoints(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectRequest]);
 
   const toPagePoint = (clientX: number, clientY: number): Point => {
     const rect = svgRef.current!.getBoundingClientRect();
@@ -433,16 +634,106 @@ function PdfCanvas({
       onCreated();
     });
 
+  const commitGeometry = (id: string, markupType: MarkupType, points: Point[]) =>
+    runAction(async () => {
+      await api.updateMarkupGeometry(id, markupType, { points });
+      onCreated();
+    });
+
+  const commitLength = (p1: Point, p2: Point) =>
+    runAction(async () => {
+      if (!pageScale) throw new Error("calibrate a scale first");
+      await api.recordLength(page.id, pageScale.id, p1, p2, lengthUnit, null);
+      onMeasurementCreated();
+    });
+
+  const commitArea = (points: Point[]) =>
+    runAction(async () => {
+      if (!pageScale) throw new Error("calibrate a scale first");
+      await api.recordArea(page.id, pageScale.id, points, areaUnit, null);
+      onMeasurementCreated();
+    });
+
+  const commitCount = (points: Point[]) =>
+    runAction(async () => {
+      await api.recordCount(page.id, points, null);
+      onMeasurementCreated();
+    });
+
+  const commitPendingCalibration = () => {
+    // Enter (onKeyDown) and Tab-away (onBlur) can both fire for the same
+    // commit — Enter starts this async call, then the blur that follows
+    // immediately (before React re-renders with pendingCalibration
+    // cleared) would otherwise re-enter this function and submit a
+    // second, duplicate calibrateScale call. A ref-based guard is
+    // required rather than checking `pendingCalibration` itself, since
+    // that's React state and won't reflect this tick's clear until the
+    // next render.
+    if (calibrationInFlightRef.current) return;
+    const calibration = pendingCalibration;
+    const inches = Number(pendingCalibrationInches);
+    setPendingCalibration(null);
+    if (!calibration || !pendingCalibrationInches.trim() || !(inches > 0)) return;
+
+    calibrationInFlightRef.current = true;
+    runAction(async () => {
+      try {
+        const s = await api.calibrateScale(page.id, calibration.p1, calibration.p2, inches, "imperial", user.id);
+        onScaleChanged(s);
+      } finally {
+        calibrationInFlightRef.current = false;
+      }
+    });
+  };
+
+  const selectTool = (t: DrawTool) => {
+    setTool(t);
+    setClickPoints([]);
+    setPendingTextPoint(null);
+    setPendingCalibration(null);
+    updateSelection(null);
+    setMoveState(null);
+    setResizeState(null);
+    setLivePoints(null);
+    setPanState(null);
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (tool === "select") return;
+    if (tool === "pan") {
+      const el = viewportRef.current;
+      if (!el) return;
+      setPanState({ startX: e.clientX, startY: e.clientY, scrollLeft: el.scrollLeft, scrollTop: el.scrollTop });
+      return;
+    }
     const p = toPagePoint(e.clientX, e.clientY);
+    if (tool === "select") {
+      const tolerance = 8 * scale;
+      const selected = markups.find((m) => m.id === selectedId);
+      if (selected && !selected.locked) {
+        const handleIdx = resizeHandles(selected).findIndex(
+          (h) => Math.hypot(h[0] - p[0], h[1] - p[1]) < tolerance * 1.5,
+        );
+        if (handleIdx >= 0) {
+          setResizeState({ id: selected.id, pointIndex: handleIdx });
+          setLivePoints(selected.geometry.points);
+          return;
+        }
+      }
+      const hit = [...markups].reverse().find((m) => !m.hidden && hitTest(m, p, tolerance));
+      updateSelection(hit ? hit.id : null);
+      if (hit && !hit.locked) {
+        setMoveState({ id: hit.id, originPoints: hit.geometry.points, startPointer: p });
+        setLivePoints(hit.geometry.points);
+      }
+      return;
+    }
     if (tool === "Text") {
       setPendingTextPoint(p);
       setPendingTextValue("");
       return;
     }
-    if (tool === "Cloud") {
-      setCloudPoints((prev) => [...prev, p]);
+    if (CLICK_ACCUMULATE_TOOLS.includes(tool)) {
+      setClickPoints((prev) => [...prev, p]);
       return;
     }
     setDragStart(p);
@@ -450,20 +741,74 @@ function PdfCanvas({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (panState) {
+      const el = viewportRef.current;
+      if (el) {
+        el.scrollLeft = panState.scrollLeft - (e.clientX - panState.startX);
+        el.scrollTop = panState.scrollTop - (e.clientY - panState.startY);
+      }
+      return;
+    }
+    if (moveState) {
+      const p = toPagePoint(e.clientX, e.clientY);
+      const dx = p[0] - moveState.startPointer[0];
+      const dy = p[1] - moveState.startPointer[1];
+      setLivePoints(moveState.originPoints.map(([x, y]) => [x + dx, y + dy] as Point));
+      return;
+    }
+    if (resizeState) {
+      const p = toPagePoint(e.clientX, e.clientY);
+      setLivePoints((prev) => {
+        if (!prev) return prev;
+        const next = [...prev];
+        next[resizeState.pointIndex] = p;
+        return next;
+      });
+      return;
+    }
     if (!dragStart) return;
     setDragCurrent(toPagePoint(e.clientX, e.clientY));
   };
 
   const handleMouseUp = () => {
+    if (panState) {
+      setPanState(null);
+      return;
+    }
+    if (moveState) {
+      const markupType = markups.find((m) => m.id === moveState.id)?.markup_type;
+      const changed = livePoints && JSON.stringify(livePoints) !== JSON.stringify(moveState.originPoints);
+      if (markupType && changed && livePoints) commitGeometry(moveState.id, markupType, livePoints);
+      setMoveState(null);
+      setLivePoints(null);
+      return;
+    }
+    if (resizeState) {
+      const original = markups.find((m) => m.id === resizeState.id);
+      const changed = original && livePoints && JSON.stringify(livePoints) !== JSON.stringify(original.geometry.points);
+      if (original && changed && livePoints) commitGeometry(resizeState.id, original.markup_type, livePoints);
+      setResizeState(null);
+      setLivePoints(null);
+      return;
+    }
     if (!dragStart || !dragCurrent) return;
-    commitShape(tool as MarkupType, [dragStart, dragCurrent]);
+    if (tool === "Calibrate") {
+      setPendingCalibration({ p1: dragStart, p2: dragCurrent });
+      setPendingCalibrationInches("");
+    } else if (tool === "Length") {
+      commitLength(dragStart, dragCurrent);
+    } else {
+      commitShape(tool as MarkupType, [dragStart, dragCurrent]);
+    }
     setDragStart(null);
     setDragCurrent(null);
   };
 
-  const finishCloud = () => {
-    if (cloudPoints.length >= 3) commitShape("Cloud", cloudPoints);
-    setCloudPoints([]);
+  const finishClickShape = () => {
+    if (tool === "Cloud" && clickPoints.length >= 3) commitShape("Cloud", clickPoints);
+    else if (tool === "Area" && clickPoints.length >= 3) commitArea(clickPoints);
+    else if (tool === "Count" && clickPoints.length >= 1) commitCount(clickPoints);
+    setClickPoints([]);
   };
 
   const commitPendingText = () => {
@@ -473,51 +818,98 @@ function PdfCanvas({
     setPendingTextPoint(null);
   };
 
-  const isDragTool = tool !== "select" && tool !== "Cloud" && tool !== "Text";
+  const isDragPreviewTool = DRAG_PAIR_TOOLS.includes(tool);
 
   return (
     <div>
       <div className="row">
-        <select
-          value={tool}
-          onChange={(e) => {
-            setTool(e.target.value as DrawTool);
-            setCloudPoints([]);
-            setPendingTextPoint(null);
-          }}
-        >
+        <select value={tool} onChange={(e) => selectTool(e.target.value as DrawTool)}>
           <option value="select">Select (no draw)</option>
-          <option value="Rectangle">Draw: Rectangle</option>
-          <option value="Line">Draw: Line</option>
-          <option value="Arrow">Draw: Arrow</option>
-          <option value="Cloud">Draw: Cloud (click points, then Finish)</option>
-          <option value="Text">Draw: Text (click to place)</option>
+          <option value="pan">Pan (drag to scroll)</option>
+          <optgroup label="Markup">
+            <option value="Rectangle">Draw: Rectangle</option>
+            <option value="Line">Draw: Line</option>
+            <option value="Arrow">Draw: Arrow</option>
+            <option value="Cloud">Draw: Cloud (click points, then Finish)</option>
+            <option value="Text">Draw: Text (click to place)</option>
+          </optgroup>
+          <optgroup label="Measurement">
+            <option value="Calibrate">Measure: Calibrate scale (drag 2 pts)</option>
+            <option value="Length">Measure: Length (drag 2 pts)</option>
+            <option value="Area">Measure: Area (click points, then Finish)</option>
+            <option value="Count">Measure: Count (click points, then Finish)</option>
+          </optgroup>
         </select>
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
-        {tool === "Cloud" && (
-          <button onClick={finishCloud} disabled={cloudPoints.length < 3}>
-            Finish cloud ({cloudPoints.length} pts)
+        {MARKUP_DRAW_TOOLS.includes(tool as MarkupType) && (
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
+        )}
+        {tool === "Length" && (
+          <select value={lengthUnit} onChange={(e) => setLengthUnit(e.target.value as api.LengthUnitCode)}>
+            <option value="in">in</option>
+            <option value="ft">ft</option>
+            <option value="mm">mm</option>
+            <option value="cm">cm</option>
+            <option value="m">m</option>
+          </select>
+        )}
+        {tool === "Area" && (
+          <select value={areaUnit} onChange={(e) => setAreaUnit(e.target.value as api.AreaUnitCode)}>
+            <option value="sq_in">sq in</option>
+            <option value="sq_ft">sq ft</option>
+            <option value="sq_m">sq m</option>
+          </select>
+        )}
+        {(tool === "Length" || tool === "Area") && !pageScale && <span className="muted">calibrate a scale first</span>}
+        {CLICK_ACCUMULATE_TOOLS.includes(tool) && (
+          <button onClick={finishClickShape} disabled={tool === "Count" ? clickPoints.length < 1 : clickPoints.length < 3}>
+            Finish {tool} ({clickPoints.length} pts)
           </button>
         )}
+        <span className="muted">{pageScale ? `Scale: ${pageScale.inches_per_page_unit.toFixed(4)} in/pt (${pageScale.unit_system})` : "not calibrated"}</span>
       </div>
-      <div className="pdf-canvas-wrap" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
-        {imageUri ? (
-          <img src={imageUri} width={RENDER_WIDTH} height={renderedHeight} draggable={false} alt={`page ${page.page_number}`} />
-        ) : (
-          <div className="thumb-placeholder" style={{ width: RENDER_WIDTH, height: renderedHeight }}>
-            rendering…
-          </div>
-        )}
-        <svg
-          ref={svgRef}
-          width={RENDER_WIDTH}
-          height={renderedHeight}
-          className="pdf-canvas-overlay"
-          style={{ cursor: tool === "select" ? "default" : "crosshair" }}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-        >
+      <div className="row">
+        <button onClick={zoomOut} disabled={zoom <= ZOOM_MIN}>
+          −
+        </button>
+        <span className="muted">{Math.round(zoom * 100)}%</span>
+        <button onClick={zoomIn} disabled={zoom >= ZOOM_MAX}>
+          +
+        </button>
+        <button onClick={zoomReset} disabled={zoom === 1}>
+          Reset zoom
+        </button>
+      </div>
+      <div className="pdf-canvas-viewport" ref={viewportRef} style={{ width: RENDER_WIDTH, height: viewportHeight }}>
+        <div className="pdf-canvas-wrap" style={{ width: renderWidth, height: renderedHeight }}>
+          {imageUri ? (
+            <img src={imageUri} width={renderWidth} height={renderedHeight} draggable={false} alt={`page ${page.page_number}`} />
+          ) : (
+            <div className="thumb-placeholder" style={{ width: renderWidth, height: renderedHeight }}>
+              rendering…
+            </div>
+          )}
+          <svg
+            ref={svgRef}
+            width={renderWidth}
+            height={renderedHeight}
+            className="pdf-canvas-overlay"
+            style={{
+              cursor: panState
+                ? "grabbing"
+                : tool === "pan"
+                  ? "grab"
+                  : moveState
+                    ? "grabbing"
+                    : resizeState
+                      ? "nwse-resize"
+                      : tool === "select"
+                        ? "default"
+                        : "crosshair",
+            }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+          >
           <defs>
             <marker id={`arrowhead-${page.id}`} markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" />
@@ -525,17 +917,68 @@ function PdfCanvas({
           </defs>
           {markups
             .filter((m) => !m.hidden)
-            .map((m) => (
-              <MarkupShape key={m.id} markup={m} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />
-            ))}
-          {isDragTool && dragStart && dragCurrent && (
-            <PreviewShape type={tool as MarkupType} start={dragStart} current={dragCurrent} toPixel={toPixel} color={color} />
+            .map((m) => {
+              const dragging = (moveState?.id === m.id || resizeState?.id === m.id) && livePoints;
+              const shown = dragging ? { ...m, geometry: { ...m.geometry, points: livePoints! } } : m;
+              return <MarkupShape key={m.id} markup={shown} toPixel={toPixel} arrowMarkerId={`arrowhead-${page.id}`} />;
+            })}
+          {measurements.map((m) => (
+            <MeasurementShape key={m.id} measurement={m} toPixel={toPixel} />
+          ))}
+          {pendingCalibration && (
+            <line
+              x1={toPixel(pendingCalibration.p1)[0]}
+              y1={toPixel(pendingCalibration.p1)[1]}
+              x2={toPixel(pendingCalibration.p2)[0]}
+              y2={toPixel(pendingCalibration.p2)[1]}
+              stroke="#ff9800"
+              strokeWidth={2}
+              strokeDasharray="4 2"
+            />
           )}
-          {cloudPoints.length > 0 && (
+          {selectedId &&
+            (() => {
+              const sel = markups.find((m) => m.id === selectedId);
+              if (!sel) return null;
+              const dragging = (moveState?.id === sel.id || resizeState?.id === sel.id) && livePoints;
+              const points = dragging ? livePoints! : sel.geometry.points;
+              const box = boundingBox(points);
+              const [bx1, by1] = toPixel([box.minX, box.minY]);
+              const [bx2, by2] = toPixel([box.maxX, box.maxY]);
+              const handles = resizeHandles({ ...sel, geometry: { ...sel.geometry, points } });
+              return (
+                <g pointerEvents="none">
+                  <rect
+                    x={Math.min(bx1, bx2) - 4}
+                    y={Math.min(by1, by2) - 4}
+                    width={Math.abs(bx2 - bx1) + 8}
+                    height={Math.abs(by2 - by1) + 8}
+                    fill="none"
+                    stroke="#2196f3"
+                    strokeWidth={1}
+                    strokeDasharray="3 2"
+                  />
+                  {handles.map((h, i) => {
+                    const [hx, hy] = toPixel(h);
+                    return <circle key={i} cx={hx} cy={hy} r={5} fill="#2196f3" />;
+                  })}
+                </g>
+              );
+            })()}
+          {isDragPreviewTool && dragStart && dragCurrent && (
+            <PreviewShape
+              type={tool}
+              start={dragStart}
+              current={dragCurrent}
+              toPixel={toPixel}
+              color={tool === "Length" || tool === "Calibrate" ? "#ff9800" : color}
+            />
+          )}
+          {clickPoints.length > 0 && (
             <polyline
-              points={cloudPoints.map((p) => toPixel(p).join(",")).join(" ")}
+              points={clickPoints.map((p) => toPixel(p).join(",")).join(" ")}
               fill="none"
-              stroke={color}
+              stroke={tool === "Area" || tool === "Count" ? "#00897b" : color}
               strokeWidth={2}
               strokeDasharray="4 2"
             />
@@ -555,6 +998,27 @@ function PdfCanvas({
             onBlur={commitPendingText}
           />
         )}
+        {pendingCalibration &&
+          (() => {
+            const [x1, y1] = toPixel(pendingCalibration.p1);
+            const [x2, y2] = toPixel(pendingCalibration.p2);
+            return (
+              <input
+                autoFocus
+                className="canvas-text-input"
+                placeholder="real-world inches"
+                style={{ left: (x1 + x2) / 2, top: (y1 + y2) / 2 }}
+                value={pendingCalibrationInches}
+                onChange={(e) => setPendingCalibrationInches(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitPendingCalibration();
+                  if (e.key === "Escape") setPendingCalibration(null);
+                }}
+                onBlur={commitPendingCalibration}
+              />
+            );
+          })()}
+        </div>
       </div>
     </div>
   );
@@ -625,7 +1089,7 @@ function PreviewShape({
   toPixel,
   color,
 }: {
-  type: MarkupType;
+  type: DrawTool;
   start: Point;
   current: Point;
   toPixel: (p: Point) => Point;
@@ -650,6 +1114,50 @@ function PreviewShape({
   return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={2} strokeDasharray="4 2" />;
 }
 
+const MEASUREMENT_COLOR = "#00897b";
+
+/** Renders one persisted measurement plus its value/unit label directly on the canvas (MEAS-06/labels). */
+function MeasurementShape({ measurement, toPixel }: { measurement: MeasurementDto; toPixel: (p: Point) => Point }) {
+  const pts = measurement.geometry.map(toPixel);
+  const label = measurement.measurement_type === "Count" ? `${measurement.value} ct` : `${measurement.value.toFixed(2)} ${measurement.unit}`;
+  const centroid = (): Point => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
+
+  if (measurement.measurement_type === "Length") {
+    const [[x1, y1], [x2, y2]] = pts;
+    return (
+      <g>
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={MEASUREMENT_COLOR} strokeWidth={2} />
+        <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 4} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+          {label}
+        </text>
+      </g>
+    );
+  }
+  if (measurement.measurement_type === "Area") {
+    const [cx, cy] = centroid();
+    return (
+      <g>
+        <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={`${MEASUREMENT_COLOR}22`} stroke={MEASUREMENT_COLOR} strokeWidth={2} />
+        <text x={cx} y={cy} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+          {label}
+        </text>
+      </g>
+    );
+  }
+  // Count
+  const [cx, cy] = centroid();
+  return (
+    <g>
+      {pts.map((p, i) => (
+        <circle key={i} cx={p[0]} cy={p[1]} r={4} fill={MEASUREMENT_COLOR} />
+      ))}
+      <text x={cx} y={cy - 8} fill={MEASUREMENT_COLOR} fontSize={12} fontFamily="inherit">
+        {label}
+      </text>
+    </g>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Markup + Measurement, scoped to one page (MARK-*/MEAS-*)
 // ---------------------------------------------------------------------------
@@ -667,13 +1175,36 @@ function PagePanel({
   const [markups, setMarkups] = useState<MarkupDto[]>([]);
   const [commentsByMarkup, setCommentsByMarkup] = useState<Record<string, MarkupCommentDto[]>>({});
   const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
+  const [undoStatus, setUndoStatus] = useState<api.UndoStatusDto>({ can_undo: false, can_redo: false });
+  const [selectedMarkupId, setSelectedMarkupId] = useState<string | null>(null);
+  const [selectRequest, setSelectRequest] = useState<SelectRequest | null>(null);
 
-  const reloadMarkups = () => runAction(async () => setMarkups(await api.listMarkupsByPage(page.id)));
+  const reloadMarkups = () =>
+    runAction(async () => {
+      const [markups, undoStatus] = await Promise.all([
+        api.listMarkupsByPage(page.id),
+        api.markupUndoStatus(page.id),
+      ]);
+      setMarkups(markups);
+      setUndoStatus(undoStatus);
+    });
 
   useEffect(() => {
     reloadMarkups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
+
+  const undoMarkup = () =>
+    runAction(async () => {
+      await api.undoMarkup(page.id);
+      await reloadMarkups();
+    });
+
+  const redoMarkup = () =>
+    runAction(async () => {
+      await api.redoMarkup(page.id);
+      await reloadMarkups();
+    });
 
   const toggleLock = (m: MarkupDto) => runAction(async () => {
     await api.setMarkupLocked(m.id, !m.locked);
@@ -707,14 +1238,7 @@ function PagePanel({
 
   // -- measurement --
   const [scale, setScale] = useState<ScaleDto | null>(null);
-  const [calP1, setCalP1] = useState("0,0");
-  const [calP2, setCalP2] = useState("2,0");
-  const [calInches, setCalInches] = useState("120");
   const [measurements, setMeasurements] = useState<MeasurementDto[]>([]);
-  const [lenP1, setLenP1] = useState("0,0");
-  const [lenP2, setLenP2] = useState("2,0");
-  const [lenUnit, setLenUnit] = useState<api.LengthUnitCode>("ft");
-  const [countMarkers, setCountMarkers] = useState("1,1 2,2 3,3");
 
   const reloadMeasurements = () =>
     runAction(async () => setMeasurements(await api.listMeasurementsByPage(page.id)));
@@ -724,25 +1248,6 @@ function PagePanel({
     reloadMeasurements();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
-
-  const calibrate = () =>
-    runAction(async () => {
-      const s = await api.calibrateScale(page.id, parsePoint(calP1), parsePoint(calP2), Number(calInches), "imperial", user.id);
-      setScale(s);
-    });
-
-  const recordLength = () =>
-    runAction(async () => {
-      if (!scale) throw new Error("calibrate a scale first");
-      await api.recordLength(page.id, scale.id, parsePoint(lenP1), parsePoint(lenP2), lenUnit, null);
-      await reloadMeasurements();
-    });
-
-  const recordCount = () =>
-    runAction(async () => {
-      await api.recordCount(page.id, parsePoints(countMarkers), null);
-      await reloadMeasurements();
-    });
 
   const removeMeasurement = (m: MeasurementDto) =>
     runAction(async () => {
@@ -756,18 +1261,40 @@ function PagePanel({
         Markup + Measurement — page {page.page_number} ({page.width.toFixed(0)}×{page.height.toFixed(0)} pt)
       </h3>
 
+      <PdfCanvas
+        page={page}
+        markups={markups}
+        measurements={measurements}
+        scale={scale}
+        user={user}
+        onCreated={reloadMarkups}
+        onScaleChanged={setScale}
+        onMeasurementCreated={reloadMeasurements}
+        runAction={runAction}
+        onSelectionChange={setSelectedMarkupId}
+        selectRequest={selectRequest}
+      />
+
       <div className="two-col">
         <div>
-          <h4>Markup (MARK-01–04/07/08)</h4>
-          <PdfCanvas page={page} markups={markups} user={user} onCreated={reloadMarkups} runAction={runAction} />
-          <ul>
+          <h4>Markup (MARK-01–06/07/08)</h4>
+          <div className="row">
+            <button onClick={undoMarkup} disabled={!undoStatus.can_undo}>
+              Undo
+            </button>
+            <button onClick={redoMarkup} disabled={!undoStatus.can_redo}>
+              Redo
+            </button>
+          </div>
+          <ul className="layer-list">
             {markups.map((m) => (
-              <li key={m.id}>
+              <li key={m.id} className={m.id === selectedMarkupId ? "layer-row selected" : "layer-row"}>
                 <div>
                   <strong>{m.markup_type}</strong> {JSON.stringify(m.geometry.points)}{" "}
                   {m.locked && <span className="tag">locked</span>} {m.hidden && <span className="tag">hidden</span>}
                 </div>
                 <div className="row">
+                  <button onClick={() => setSelectRequest({ id: m.id, nonce: Date.now() })}>select</button>
                   <button onClick={() => toggleLock(m)}>{m.locked ? "unlock" : "lock"}</button>
                   <button onClick={() => toggleHidden(m)}>{m.hidden ? "show" : "hide"}</button>
                   <button onClick={() => removeMarkup(m)}>delete</button>
@@ -797,38 +1324,7 @@ function PagePanel({
 
         <div>
           <h4>Measurement (MEAS-01–07)</h4>
-          <div className="row">
-            <input placeholder="p1 x,y" value={calP1} onChange={(e) => setCalP1(e.target.value)} />
-            <input placeholder="p2 x,y" value={calP2} onChange={(e) => setCalP2(e.target.value)} />
-            <input placeholder="real-world inches" value={calInches} onChange={(e) => setCalInches(e.target.value)} />
-            <button onClick={calibrate}>Calibrate scale</button>
-          </div>
-          {scale && (
-            <p className="muted">
-              Scale: {scale.inches_per_page_unit.toFixed(4)} in/page-unit ({scale.unit_system})
-            </p>
-          )}
-
-          <div className="row">
-            <input placeholder="p1 x,y" value={lenP1} onChange={(e) => setLenP1(e.target.value)} />
-            <input placeholder="p2 x,y" value={lenP2} onChange={(e) => setLenP2(e.target.value)} />
-            <select value={lenUnit} onChange={(e) => setLenUnit(e.target.value as api.LengthUnitCode)}>
-              <option value="in">in</option>
-              <option value="ft">ft</option>
-              <option value="mm">mm</option>
-              <option value="cm">cm</option>
-              <option value="m">m</option>
-            </select>
-            <button onClick={recordLength} disabled={!scale}>
-              Record length
-            </button>
-          </div>
-
-          <div className="row">
-            <input placeholder="markers: x,y x,y ..." value={countMarkers} onChange={(e) => setCountMarkers(e.target.value)} />
-            <button onClick={recordCount}>Record count</button>
-          </div>
-
+          <p className="muted">Calibrate/length/area/count are drawn on the canvas above — pick a Measure tool.</p>
           <ul>
             {measurements.map((m) => (
               <li key={m.id}>
@@ -891,6 +1387,16 @@ function TakeoffPanel({
 
   const exportCsv = () => runAction(async () => setCsv(await api.exportTakeoffCsv(doc.id)));
 
+  const exportXlsx = () =>
+    runAction(async () => {
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "Excel Workbook", extensions: ["xlsx"] }],
+        defaultPath: `${doc.title}-takeoff.xlsx`,
+      });
+      if (!outputPath) return;
+      await api.exportTakeoffXlsx(doc.id, outputPath);
+    });
+
   return (
     <div className="nested">
       <h3>Takeoff (TAKE-01–05)</h3>
@@ -913,7 +1419,313 @@ function TakeoffPanel({
         ))}
       </ul>
       <button onClick={exportCsv}>Export CSV</button>
+      <button onClick={exportXlsx}>Export Excel…</button>
       {csv && <pre className="csv-preview">{csv}</pre>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RFI (RFI-01/02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+const RFI_STATUSES: RfiStatus[] = ["Open", "Answered", "Closed"];
+
+function RfiPanel({
+  document: doc,
+  pages,
+  user,
+  runAction,
+}: {
+  document: DocumentDto;
+  pages: PageDto[];
+  user: UserDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [rfis, setRfis] = useState<RfiDto[]>([]);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [tiePageId, setTiePageId] = useState("");
+  const [tieMarkupId, setTieMarkupId] = useState("");
+  const [markupsForTiePage, setMarkupsForTiePage] = useState<MarkupDto[]>([]);
+  const [statusDraft, setStatusDraft] = useState<Record<string, RfiStatus>>({});
+  const [responseDraft, setResponseDraft] = useState<Record<string, string>>({});
+
+  const reload = () => runAction(async () => setRfis(await api.listRfisForDocument(doc.id)));
+
+  useEffect(() => {
+    reload();
+    setTitle("");
+    setDescription("");
+    setTiePageId("");
+    setTieMarkupId("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  useEffect(() => {
+    setTieMarkupId("");
+    if (!tiePageId) {
+      setMarkupsForTiePage([]);
+      return;
+    }
+    runAction(async () => setMarkupsForTiePage(await api.listMarkupsByPage(tiePageId)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tiePageId]);
+
+  const createRfi = () =>
+    runAction(async () => {
+      await api.createRfi(doc.id, tiePageId || null, tieMarkupId || null, title, description || null, user.id);
+      setTitle("");
+      setDescription("");
+      setTiePageId("");
+      setTieMarkupId("");
+      await reload();
+    });
+
+  const updateStatus = (r: RfiDto) =>
+    runAction(async () => {
+      const status = statusDraft[r.id] ?? r.status;
+      // Always send the textarea's current value verbatim, including an
+      // empty string — this UI has no separate "leave response unchanged"
+      // affordance distinct from the box's content, so collapsing "" to
+      // null here would silently fail to let someone clear a response
+      // (set_status treats null as "leave untouched", not "clear it").
+      const response = responseDraft[r.id] ?? r.response ?? "";
+      await api.setRfiStatus(r.id, status, response);
+      await reload();
+    });
+
+  const pageNumberFor = (pageId: string | null) => pages.find((p) => p.id === pageId)?.page_number ?? null;
+
+  return (
+    <div className="nested">
+      <h3>RFI (RFI-01/02)</h3>
+      <div className="row">
+        <input placeholder="RFI title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <select value={tiePageId} onChange={(e) => setTiePageId(e.target.value)}>
+          <option value="">(not tied to a page)</option>
+          {pages.map((p) => (
+            <option key={p.id} value={p.id}>
+              page {p.page_number}
+            </option>
+          ))}
+        </select>
+        {tiePageId && (
+          <select value={tieMarkupId} onChange={(e) => setTieMarkupId(e.target.value)}>
+            <option value="">(not tied to a specific markup)</option>
+            {markupsForTiePage.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.markup_type} {m.id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="row">
+        <input
+          placeholder="description (optional)"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+        <button onClick={createRfi} disabled={!title}>
+          Create RFI
+        </button>
+      </div>
+      <ul>
+        {rfis.map((r) => {
+          const pageNumber = pageNumberFor(r.page_id);
+          return (
+            <li key={r.id}>
+              <div>
+                <strong>#{r.number}</strong> {r.title} <span className={`tag tag-${r.status.toLowerCase()}`}>{r.status}</span>
+                {pageNumber != null && <span className="tag">page {pageNumber}</span>}
+                {r.markup_id && <span className="tag">markup {r.markup_id.slice(0, 8)}</span>}
+              </div>
+              {r.description && <div className="muted">{r.description}</div>}
+              <div className="row">
+                <select
+                  value={statusDraft[r.id] ?? r.status}
+                  onChange={(e) => setStatusDraft((prev) => ({ ...prev, [r.id]: e.target.value as RfiStatus }))}
+                >
+                  {RFI_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  placeholder="response"
+                  value={responseDraft[r.id] ?? r.response ?? ""}
+                  onChange={(e) => setResponseDraft((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                />
+                <button onClick={() => updateStatus(r)}>Update</button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recovery (REL-01/02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+const AUTOSAVE_INTERVAL_MS = 3 * 60 * 1000;
+
+function RecoveryPanel({
+  document: doc,
+  runAction,
+}: {
+  document: DocumentDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [snapshots, setSnapshots] = useState<api.RecoverySnapshotDto[]>([]);
+
+  const reload = () => runAction(async () => setSnapshots(await api.listRecoverySnapshots(doc.id)));
+
+  useEffect(() => {
+    reload();
+    // A failed autosave tick (e.g. no libpdfium this session) shouldn't pop
+    // an error banner every 3 minutes — that's runAction's job for the
+    // explicit Restore/Discard actions below, not a background timer.
+    const tick = () => api.autosaveSnapshot(doc.id).then(reload).catch(() => {});
+    const interval = setInterval(tick, AUTOSAVE_INTERVAL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  const restore = (s: api.RecoverySnapshotDto) =>
+    runAction(async () => {
+      const outputPath = await saveFileDialog({
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+        defaultPath: `recovered-${s.created_at.replace(/[:.]/g, "-")}.pdf`,
+      });
+      if (!outputPath) return;
+      await api.restoreRecoverySnapshot(s.id, outputPath);
+    });
+
+  const discard = (s: api.RecoverySnapshotDto) =>
+    runAction(async () => {
+      await api.discardRecoverySnapshot(s.id);
+      await reload();
+    });
+
+  return (
+    <div className="nested">
+      <h3>Recovery (REL-01/02)</h3>
+      <p className="muted">
+        Autosaves a flattened snapshot of this document every {AUTOSAVE_INTERVAL_MS / 60000} minutes while it's open.
+        Restoring gets you a copy of that snapshot file — it never changes any markup/measurement data, which is
+        already saved as you work.
+      </p>
+      <ul>
+        {snapshots.map((s) => (
+          <li key={s.id}>
+            {s.created_at} <button onClick={() => restore(s)}>Restore…</button>{" "}
+            <button onClick={() => discard(s)}>Discard</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Document revisions (RFI-03 / DOC-02), scoped to the whole document
+// ---------------------------------------------------------------------------
+
+function DocumentVersionsPanel({
+  document: doc,
+  user,
+  runAction,
+}: {
+  document: DocumentDto;
+  user: UserDto;
+  runAction: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const [versions, setVersions] = useState<DocumentVersionDto[]>([]);
+  const [compareAId, setCompareAId] = useState("");
+  const [compareBId, setCompareBId] = useState("");
+  const [comparePage, setComparePage] = useState(1);
+  const [overlayDataUri, setOverlayDataUri] = useState<string | null>(null);
+
+  const reload = () => runAction(async () => setVersions(await api.listDocumentVersions(doc.id)));
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
+
+  const saveRevision = () =>
+    runAction(async () => {
+      await api.saveDocumentRevision(doc.id, user.id);
+      await reload();
+    });
+
+  const openRevision = (v: DocumentVersionDto) => runAction(async () => openPath(v.file_snapshot_path));
+
+  const compareRevisions = () =>
+    runAction(async () => {
+      if (!compareAId || !compareBId) return;
+      setOverlayDataUri(await api.compareDocumentVersions(compareAId, compareBId, comparePage, 900));
+    });
+
+  return (
+    <div className="nested">
+      <h3>Revisions (RFI-03)</h3>
+      <p className="muted">
+        Each saved revision is a flattened snapshot of this drawing (current markups included) at that moment —
+        version history per sheet, per the master list.
+      </p>
+      <div className="row">
+        <button onClick={saveRevision}>Save revision</button>
+      </div>
+      <ul>
+        {versions.map((v) => (
+          <li key={v.id}>
+            v{v.version_number} <button onClick={() => openRevision(v)}>Open…</button>
+          </li>
+        ))}
+      </ul>
+
+      <h4>Compare revisions (RFI-04)</h4>
+      <p className="muted">
+        Renders one page from each revision and highlights what changed between them — changed pixels in red,
+        unchanged content faded.
+      </p>
+      <div className="row">
+        <select value={compareAId} onChange={(e) => setCompareAId(e.target.value)}>
+          <option value="">older revision…</option>
+          {versions.map((v) => (
+            <option key={v.id} value={v.id}>
+              v{v.version_number}
+            </option>
+          ))}
+        </select>
+        <select value={compareBId} onChange={(e) => setCompareBId(e.target.value)}>
+          <option value="">newer revision…</option>
+          {versions.map((v) => (
+            <option key={v.id} value={v.id}>
+              v{v.version_number}
+            </option>
+          ))}
+        </select>
+        <input
+          type="number"
+          min={1}
+          value={comparePage}
+          onChange={(e) => setComparePage(Number(e.target.value) || 1)}
+          style={{ width: "5em" }}
+        />
+        <button onClick={compareRevisions} disabled={!compareAId || !compareBId}>
+          Compare
+        </button>
+      </div>
+      {overlayDataUri && (
+        <img src={overlayDataUri} alt="Revision comparison overlay" style={{ maxWidth: "100%" }} />
+      )}
     </div>
   );
 }

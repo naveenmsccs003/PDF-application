@@ -113,6 +113,22 @@ CREATE TABLE recovery_state (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE rfi (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES document(id) ON DELETE CASCADE,
+    page_id TEXT REFERENCES page(id) ON DELETE SET NULL,
+    markup_id TEXT REFERENCES markup(id) ON DELETE SET NULL,
+    number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    response TEXT,
+    created_by TEXT REFERENCES user(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (document_id, number)
+);
+
 CREATE INDEX idx_document_project_id ON document(project_id);
 CREATE INDEX idx_document_version_document_id ON document_version(document_id);
 CREATE INDEX idx_page_document_id ON page(document_id);
@@ -123,3 +139,5 @@ CREATE INDEX idx_measurement_page_id ON measurement(page_id);
 CREATE INDEX idx_takeoff_item_measurement_id ON takeoff_item(measurement_id);
 CREATE INDEX idx_recovery_state_document_id ON recovery_state(document_id);
 CREATE INDEX idx_project_member_user_id ON project_member(user_id);
+CREATE INDEX idx_rfi_document_id ON rfi(document_id);
+CREATE INDEX idx_rfi_page_id ON rfi(page_id);

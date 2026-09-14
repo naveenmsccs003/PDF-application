@@ -89,7 +89,11 @@ impl MarkupGeometry {
         }
     }
 
-    fn validate(&self, kind: MarkupType) -> Result<(), MarkupError> {
+    /// `pub` so callers routing through `Command`/`UndoStack` (which apply
+    /// via `insert_full`/`update_geometry`'s raw writes, not `create`) can
+    /// validate before constructing a command — `Command::apply` itself
+    /// doesn't, so this is the one place that guarantee still needs to run.
+    pub fn validate(&self, kind: MarkupType) -> Result<(), MarkupError> {
         let min = kind.min_points();
         if self.points.len() < min {
             return Err(MarkupError::TooFewPoints {
@@ -381,7 +385,18 @@ pub enum Command {
 impl Command {
     fn apply(&self, conn: &Connection) -> Result<(), MarkupError> {
         match self {
-            Command::Create(markup) => insert_full(conn, markup),
+            Command::Create(markup) => {
+                // `insert_full` itself performs no validation (unlike
+                // `create()`, which validates before calling it) — the one
+                // production call site (`commands::markup::create_markup`)
+                // already validates first, but that's a caller convention,
+                // not something this structurally enforces. Validating
+                // here too closes that gap for any future `Command::Create`
+                // caller (batch import, duplicate/paste, a test helper)
+                // that might forget to.
+                markup.geometry.validate(markup.markup_type)?;
+                insert_full(conn, markup)
+            }
             Command::Delete(markup) => conn
                 .execute("DELETE FROM markup WHERE id = ?1", params![markup.id])
                 .map(|_| ())
@@ -624,6 +639,29 @@ mod tests {
 
         assert!(stack.redo(&conn).unwrap());
         assert_eq!(get(&conn, &markup.id).unwrap(), markup);
+    }
+
+    #[test]
+    fn command_create_rejects_too_few_points_for_shape() {
+        let conn = open_test_db();
+        let page_id = fixture_page(&conn);
+        let markup = Markup {
+            id: mds_db::new_uuid(),
+            page_id,
+            markup_type: MarkupType::Rectangle,
+            geometry: MarkupGeometry::new(vec![Point::new(0.0, 0.0)]),
+            style: MarkupStyle::default(),
+            author: None,
+            locked: false,
+            hidden: false,
+        };
+
+        let mut stack = UndoStack::new();
+        let err = stack
+            .execute(&conn, Command::Create(markup.clone()))
+            .unwrap_err();
+        assert!(matches!(err, MarkupError::TooFewPoints { .. }));
+        assert!(matches!(get(&conn, &markup.id), Err(MarkupError::NotFound(_))));
     }
 
     #[test]

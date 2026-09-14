@@ -153,6 +153,742 @@ Phase 0 starts until the table above is clear.
       this environment still can't drive (same gap noted just above).
       Naveen exercising the canvas for real (`npm run tauri dev`) is the
       next real check, same as the outstanding IPC-bridge verification.
+  - **Select/move/resize added (2026-09-13)**: closed the gap this pass's
+    own note called out ("select/move/resize aren't built yet"). New
+    `select` mode on `PdfCanvas`: click hit-tests existing markups in page
+    space (`hitTest` — segment-distance for Line/Arrow, bounding-box for
+    Rectangle/Cloud, a padded box for Text) and highlights the topmost
+    unhidden match with a dashed selection box; dragging from inside a
+    selected, unlocked shape translates every point by the drag delta
+    (`moveState`); dragging one of its `resizeHandles` — the shape's own
+    stored points for Rectangle/Line/Arrow, none for Cloud/Text (move-only,
+    deliberately not attempting multi-point cloud editing this pass) —
+    rewrites that one point (`resizeState`). Both paths render a live
+    preview via `livePoints` and commit through the existing
+    `update_markup_geometry` IPC command (no backend change needed — it
+    already accepted arbitrary geometry) only on mouse-up, and only if the
+    geometry actually changed, then reload from `list_markups_by_page` so
+    the committed state is always what's shown. Locked markups can be
+    selected (to see they exist) but not moved or resized, matching what
+    `locked` is supposed to mean. No `rstar`/`SpatialIndex` wiring yet —
+    same call as the canvas's first pass: a page's markup count doesn't
+    yet justify it, plain O(n) hit-testing is fine here.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. **NOT
+      verified**: same live-IPC gap as every canvas interaction so far —
+      actually selecting/dragging a real markup through a signed-in
+      `npm run tauri dev` session is still Naveen's check to run, not
+      something this environment can drive.
+  - **Measurement moved onto the canvas (2026-09-13)**: closed the other
+    gap this pass's own notes called out ("everything UI-facing (calibration
+    interaction, measurement labels on the canvas)" from Phase 4's early
+    pass). `PdfCanvas` gains four Measure tools alongside the five Markup
+    ones: Calibrate (drag 2 points, then an inline "real-world inches"
+    input — same interaction shape as the Text tool's inline label, commits
+    via the existing `calibrate_scale` command), Length (drag 2 points,
+    commits via `record_length` in a toolbar-selected unit), Area (click
+    points then Finish, commits via `record_area`), Count (click points then
+    Finish, commits via `record_count`). All four reuse the drag-pair /
+    click-accumulate gesture patterns the markup tools already established
+    rather than inventing new interaction shapes. No backend change needed —
+    all four IPC commands already existed and took arbitrary geometry; only
+    `record_area` had no frontend caller before this. Persisted measurements
+    now render back onto the canvas with their value+unit as a text label
+    (`MeasurementShape` — line+midpoint label for Length, polygon+centroid
+    label for Area, dots+centroid label for Count), closing MEAS-06's
+    "labels" half for real this time (the manual-input version stored a
+    label but never displayed one on anything resembling a drawing surface).
+    Replaced the old free-text "p1 x,y"/"p2 x,y"/"markers: x,y x,y ..."
+    inputs entirely — they used arbitrary example coordinates ("0,0"/"2,0")
+    that didn't correspond to actual page geometry, whereas canvas clicks
+    are real PDF-point coordinates via the same `toPagePoint` conversion
+    markup already uses, so a calibration taken here is actually anchored to
+    the drawing. `parsePoint`/`parsePoints` helpers (only used by the removed
+    inputs) were deleted rather than left dead.
+    - Verified: `cargo check`/`cargo build -p app` unaffected (no Rust
+      changes this pass — every IPC command used already existed). `npm run
+      build` (tsc + vite) — clean, no type errors. `npm run dev` served `/`
+      with a 200 before being stopped. **NOT verified**: same live-IPC gap
+      as every canvas interaction so far — calibrating a scale and recording
+      a real length/area/count through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run.
+  - **MARK-06 undo/redo wired (2026-09-13)**: closed the scoping question
+    this pass's earlier notes deferred as "a real design question, not a
+    mechanical wiring step" — resolved as **one `UndoStack` per page**
+    (`AppState::markup_undo: Mutex<HashMap<page_id, UndoStack>>`), not per
+    document or per user: the UI is already organized per page (`PdfCanvas`/
+    `PagePanel` both take one `PageDto`), so undoing while looking at page 3
+    shouldn't revert something done on page 1; per-user needed no separate
+    handling since each user already runs their own Tauri process, so this
+    in-memory state is implicitly scoped to one user by being one process's
+    memory. `create_markup`/`update_markup_geometry`/`update_markup_style`/
+    `set_markup_locked`/`set_markup_hidden`/`delete_markup` now build a
+    `markup::Command` and route it through that page's stack instead of
+    calling `markup::create`/`update_geometry`/etc. directly — geometry
+    validation (previously only inside `markup::create`/`update_geometry`,
+    which `Command::apply` bypasses) had to be exposed as `pub fn
+    MarkupGeometry::validate` so the app layer can still enforce it before
+    handing a command to the stack. Added `undo_markup`/`redo_markup`/
+    `markup_undo_status` commands; the frontend adds Undo/Redo buttons next
+    to the markup list, disabled from `markup_undo_status`, refreshed
+    after every markup mutation (create/move/resize/lock/hide/delete all
+    funnel through the existing `reloadMarkups`).
+    - Verified: `cargo check -p markup -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 80/80 passing, no
+      regressions (`markup` still 11/11 — the undo/redo tests already
+      covered `UndoStack` itself; this pass only added callers). `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap —
+      actually creating a shape, undoing it, and redoing it through a
+      signed-in `npm run tauri dev` session is still Naveen's check to run.
+  - **MARK-05 layer panel wired to canvas selection (2026-09-13)**: the
+    markup list in `PagePanel` already existed (lock/hide/delete/comments
+    per row) but wasn't a "layer panel" in the interactive sense — it
+    couldn't select anything on the canvas, and canvas selection wasn't
+    reflected back in the list. Closed both directions: `selectedId` moved
+    out of `PdfCanvas`'s exclusive internal state — it still owns the state
+    (needed locally for drag/resize hit-testing), but now reports every
+    change up via `onSelectionChange`, and accepts external selection
+    requests via a `selectRequest: {id, nonce}` prop (a nonce so clicking
+    the same already-selected row again still re-triggers the effect).
+    `PagePanel` renders the matching row with a `.selected` highlight and
+    gives each row a "select" button that posts a `selectRequest`, which
+    `PdfCanvas` handles by switching its own tool to `"select"` and clearing
+    any in-progress draw/drag state so the highlight and resize handles
+    show immediately. Did not add z-order/reordering — there's no stored
+    order field on `Markup` to reorder by, and adding one is a schema
+    change this pass didn't need; "layer panel" here means list-canvas
+    selection sync, not a rearrangeable stacking order.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. No Rust
+      changes this pass. **NOT verified**: same live-IPC gap as every
+      canvas interaction so far — clicking a list row and seeing the
+      canvas highlight (and vice versa) through a signed-in
+      `npm run tauri dev` session is still Naveen's check to run.
+  - **VIEW-01/02 zoom and pan (2026-09-13)**: closed the last two gaps in
+    the core canvas — VIEW-01 was `IN_PROGRESS` (backend renders at any
+    pixel width; no zoom UI) and VIEW-02 was `NOT_STARTED` (tile addressing
+    supports pan in principle; nothing interactive built). Didn't build
+    real tile-based rendering for either — that's VIEW-04 territory (large/
+    vector-heavy performance, still `NOT_STARTED`, needs the engine
+    validation spike first) and would have been scope creep here. Instead:
+    zoom re-requests the same `render_page_thumbnail` IPC command at
+    `RENDER_WIDTH * zoom` pixels (+/−/Reset buttons, 25%-200%, 25% steps);
+    `PdfCanvas`'s existing `scale` factor (page units per rendered pixel)
+    already derived from the rendered width rather than a hardcoded
+    constant, so `toPagePoint`/`toPixel` — and every markup/measurement
+    that reads through them — stayed correct at any zoom with no separate
+    fix. Pan needed an actual overflow to scroll through: split the single
+    `pdf-canvas-wrap` div into an outer `pdf-canvas-viewport` (fixed size,
+    `overflow: auto`, unaffected by zoom) and an inner content div sized to
+    the current `renderWidth`/`renderedHeight`, so zooming in now genuinely
+    overflows the viewport. Added a dedicated "Pan" tool (drag anywhere to
+    scroll, via direct `scrollLeft`/`scrollTop` writes on a `viewportRef`
+    rather than React state, so panning doesn't lag a render cycle behind
+    the pointer) alongside native scrollbar/trackpad scrolling, which
+    already worked for free once real overflow existed.
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors.
+      `npm run dev` served `/` with a 200 before being stopped. No Rust
+      changes this pass (`render_page_thumbnail` already accepted an
+      arbitrary width). **NOT verified**: same live-IPC gap as every canvas
+      interaction so far — actually zooming/panning a real rendered page
+      through a signed-in `npm run tauri dev` session is still Naveen's
+      check to run.
+  - **DOC-03 close document (2026-09-13)**: the registry row itself already
+    called this "not domain logic — dropping a `PdfDocument` value; nothing
+    to test in isolation," so there was no backend gap to close, only a
+    missing UI affordance. Added a "Close document" button next to the
+    document picker in `DocumentsPanel`, shown only while a document is
+    selected; it just resets `selectedDocumentId` to `null`; the existing
+    `useEffect` keyed on that state already clears `pages`/`thumbnails`/
+    `selectedPageId` back to the document-picker view. Nothing persisted or
+    deleted — this is "stop viewing this document," not "delete" (that's
+    not a listed feature at all; DOC-01 import is the only lifecycle op
+    besides this one).
+    - Verified: `npm run build` (tsc + vite) — clean, no type errors. No
+      Rust changes. **NOT verified**: same live-IPC gap as everything
+      else — clicking Close and confirming the picker resets through a
+      signed-in `npm run tauri dev` session is still Naveen's check to run.
+  - **RFI-01/02 (2026-09-13)**: first feature area past the core
+    Document/Viewing/Markup/Measurement set — a new domain crate
+    (`crates/rfi`) following the same Domain-on-`mds_db` shape as `markup`/
+    `measurement`. Added the `rfi` table directly to
+    `crates/mds_db/migrations/0001_initial.sql` (this project has no
+    deployed instances yet, so — matching how `user`/`project`/
+    `project_member` were added earlier — there's no migration history to
+    preserve by appending a `0002_*.sql` instead). `page_id`/`markup_id` are
+    both nullable and independent, `ON DELETE SET NULL`, so an RFI survives
+    the page/markup it was filed against being deleted — the Q&A trail has
+    value on its own. `number` is assigned sequentially per document
+    (`MAX(number)+1`) so RFIs read the way they do on a real job site
+    ("RFI #14"). Deliberately did NOT build a full comment-thread model
+    like `MarkupComment` — the master list only asked for
+    open/answered/closed status tracking, so `status` + a single `response`
+    field covers RFI-02 without inventing an unrequested thread feature;
+    `set_status` doesn't enforce a state machine (closed → reopened is a
+    real workflow on job sites, not a bug to prevent). Frontend: a new
+    `RfiPanel`, document-scoped like `TakeoffPanel`, with a create form
+    (title, optional page-tie dropdown, and a markup-tie dropdown that
+    populates once a page is picked) and a per-row status/response editor.
+    Registry blocker note ("Collaboration model not confirmed") turned out
+    not to actually block this — RFI-01/02 only need the async
+    project-membership model that already exists (`project`/
+    `project_member`, used by DOC-06/MARK-07 already), not the unresolved
+    real-time-vs-async question.
+    - Verified: `cargo test -p rfi` — 5/5 passing (create/get/list round
+      trip, per-document sequential numbering, status+response update,
+      not-found error, page deletion nulls `page_id` without deleting the
+      RFI). `cargo check -p rfi -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 85/85 passing, no
+      regressions. `npm run build` — clean, no type errors. **NOT
+      verified**: same live-IPC gap as every feature so far — actually
+      filing an RFI and walking it through open → answered → closed
+      through a signed-in `npm run tauri dev` session is still Naveen's
+      check to run. Also not built: RFI-03 (drawing revision tracking,
+      overlaps `DocumentVersion`) and RFI-04 (comparison/overlay, BACKLOG).
+  - **EXPORT-01 flattened PDF export (2026-09-13)**: the first feature that
+    touches `pdf_core` itself rather than composing on top of it — needed
+    to actually burn `Markup` rows into a real PDF file rather than just
+    listing/rendering them. `pdfium-render` (already a `pdf_core`
+    dependency for rendering) turned out capable of far more than the
+    module doc's "Annotation support ... not exposed here yet" note
+    assumed when it was written pre-Markup-UI: it can create page path/text
+    objects and call Pdfium's own `FPDFPage_Flatten` (`PdfPage::flatten()`
+    in this crate version, gated behind a cargo feature this workspace
+    doesn't enable — confirmed by reading the vendored source, not
+    assumed). Added one new `PdfDocument` trait method,
+    `flatten_page_with_annotations`, with a no-op default body so the
+    `document`/`e2e_tests` `PdfDocument` fakes (which only exercise
+    import) didn't need touching — only `PdfiumDocument` overrides it.
+    `FlattenAnnotation` (`Path`/`Text`) is deliberately generic — no
+    `Markup`/`MarkupType` awareness inside `pdf_core`, keeping the "Core
+    Engine PDF abstraction" layer engine-facing, not domain-facing — so a
+    new `crates/export` crate owns the `Markup` → `FlattenAnnotation`
+    translation (rectangle → 4-corner closed path, line/arrow → open path
+    with no arrowhead drawn since that's cosmetic, cloud → closed polygon,
+    text → a real text object in Helvetica) plus the y-flip from `markup`'s
+    top-down coordinate convention into PDF's native bottom-up space.
+    `export_flattened_pdf` skips hidden markups and pages with nothing to
+    draw, then saves to a new file — the original is never touched. IPC:
+    `export_flattened_pdf(document_id, output_path)`, routed through the
+    existing dedicated PDF-engine thread (`commands::pdf`'s
+    `PdfEngineRequest` enum, same reason as the other two variants —
+    `PdfiumEngine`/`PdfDocument` aren't `Send`); frontend gets
+    `output_path` from a save dialog (`@tauri-apps/plugin-dialog`'s
+    `save()`, the write counterpart to the `open()` DOC-01's import already
+    uses) rather than the backend inventing a path.
+    - **Found and fixed a pre-existing test flake while verifying this**:
+      `cargo test -p pdf_core` runs its tests in parallel by default, and
+      this pass's 3 new real-`PdfiumEngine` tests brought the total to 7 —
+      enough to reliably hit the exact deadlock
+      `crates/pdf_engine_spike/README.md` already documents (a second
+      PDFium binding alive in the same process deadlocks). This was
+      already a latent flake at 4 such tests, just unlikely enough not to
+      have been caught yet — confirmed by reproducing the hang, then
+      confirming `--test-threads=1` alone fixed it. Fixed properly with a
+      `Mutex` in the test module serializing just the real-engine tests
+      (not the synthetic-fake ones), rather than only documenting
+      "remember `--test-threads=1`" — the earlier "cargo test -p pdf_core"
+      verification lines elsewhere in this doc were not actually reliable
+      before this fix.
+    - Verified: `cargo test -p export` — 5/5 passing (text/rectangle
+      conversion incl. the y-flip, invalid-color fallback, hidden-markup
+      and empty-page skipping). `cargo test -p pdf_core` — 10/10 passing
+      *and reproducibly so* (ran 4x back to back after the `Mutex` fix),
+      including 3 new tests against the real sample PDF + `libpdfium.so`:
+      flattening changes the rendered output, an out-of-range page index
+      still errors, and a flattened, saved file reopens with the same page
+      count. `cargo check -p export -p app` — clean. Full workspace
+      (`cargo test --workspace --exclude app`) — 95/95 passing. `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap
+      as every feature so far — actually exporting a real document with
+      real markups through a signed-in `npm run tauri dev` session, and
+      opening the resulting file in another PDF viewer to confirm the
+      markups are really burned in, is still Naveen's check to run. Not
+      built: EXPORT-02 (print).
+  - **EXPORT-03 export/handoff package (2026-09-13)**: named directly by
+    Naveen as a priority, and unblocked once EXPORT-01 existed to bundle.
+    No new domain logic — this is pure composition of two things already
+    built and independently tested (EXPORT-01's `export_document_
+    flattened_pdf`, pulled out of the `export_flattened_pdf` command as a
+    plain function so this command can call it without a second IPC round
+    trip, and TAKE-05's existing `takeoff::export_csv`). Writes two sibling
+    files into a directory the user picks — `<title>-flattened.pdf` and
+    `<title>-takeoff.csv` — rather than a zip archive: simpler to produce,
+    and doesn't need a new dependency just to get one file out of the
+    bundle later. A real zip is easy to add if a real handoff workflow
+    turns out to need single-file delivery instead of a folder.
+    - Verified: `cargo check -p app` — clean (no new domain crate, so
+      nothing new to unit-test in isolation; the logic this command
+      exercises is already covered by `cargo test -p export`/`-p
+      takeoff`). Full workspace (`cargo test --workspace --exclude app`)
+      — 95/95 passing, unaffected (app crate isn't in that run). `npm run
+      build` — clean, no type errors. **NOT verified**: same live-IPC gap
+      as every feature so far — actually picking a folder and confirming
+      both files land in it through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run.
+  - **REL-01/02 autosave + crash recovery (2026-09-13)**: neither the
+    master list nor the build prompt spell out what "autosave"/"restore"
+    should mean once you notice something specific to this app's own
+    architecture: every Markup/Measurement/RFI mutation already writes
+    straight to SQLite the moment it's made (`create_markup` et al. persist
+    immediately, no in-memory "unsaved changes" buffer the way a
+    traditional document editor has one) — so there's no draft data at
+    risk of being lost to a crash the way "autosave" usually implies. The
+    thing that genuinely isn't durable is `markup::UndoStack` (in-memory
+    only, lost on restart) — but a rendered PDF snapshot can't reconstruct
+    that either. Given that, treated a "snapshot" here as a periodic
+    **flattened PDF copy** (reusing EXPORT-01 as-is: `export_document_
+    flattened_pdf`, already pulled out as a plain function for EXPORT-03,
+    called a third time here) rather than inventing a database-backup
+    mechanism nothing asked for. New `crates/recovery` crate around the
+    already-existing (from the original schema) `recovery_state` table:
+    `create`/`get`/`list_by_document` (newest first)/`delete`, plus
+    `prune_oldest` so autosave has a disk-bounding story from day one
+    instead of accumulating snapshots forever — kept the most recent 5 per
+    document. "Restore" (REL-02) deliberately does NOT touch any live
+    Markup/Measurement row: it copies the snapshot file to a user-chosen
+    path via a save dialog. Silently overwriting live data based on a
+    guessed definition of "restore" was judged the riskier choice than a
+    restore that's merely less powerful than it could be — this can be
+    revisited if Naveen wants true data rollback instead. `AppState`
+    gained a `data_dir` field (Tauri's app data dir, already resolved at
+    startup for the SQLite path) so `autosave_snapshot` knows where to
+    write its `recovery/` subfolder. Frontend: a `RecoveryPanel` alongside
+    `RfiPanel`/`TakeoffPanel`, autosaving on a 3-minute interval (silently
+    — a background timer shouldn't pop an error banner every 3 minutes if
+    `libpdfium.so` isn't present this session; that's still `runAction`'s
+    job for the explicit Restore/Discard buttons) plus a manual snapshot
+    list with Restore/Discard.
+    - Verified: `cargo test -p recovery` — 5/5 passing (create/get/list
+      round trip, newest-first ordering, `prune_oldest` keeps only the N
+      most recent, delete returns the deleted row, cascade delete on the
+      owning document). `cargo check -p recovery -p app` — clean. Full
+      workspace (`cargo test --workspace --exclude app`) — 100/100
+      passing, no regressions. `npm run build` — clean, no type errors.
+      **NOT verified**: same live-IPC gap as every feature so far —
+      actually watching an autosave tick land, then restoring/discarding a
+      real snapshot, through a signed-in `npm run tauri dev` session is
+      still Naveen's check to run.
+  - **SEC-01/02 local password protection + secure credential handling
+    (2026-09-13)**: read "local password protection" as opening PDFs that
+    are themselves password-protected (not an app-wide login/lock screen —
+    nothing in the schema or master list suggested that, and `pdfium-render`
+    already had `load_pdf_from_file`'s password parameter sitting unused,
+    hardcoded to `None`, since `PdfiumEngine::open` was written before this
+    was needed). Added `PdfCoreError::PasswordRequired`, mapped from
+    Pdfium's own `FPDF_ERR_PASSWORD` via `PdfiumInternalError::
+    PasswordError`, as its own error variant rather than folding it into
+    the generic `Pdfium(PdfiumError)` case, so a caller can tell "ask the
+    user for a password and retry" apart from every other failure mode.
+    `PdfEngine::open` gained a `password: Option<&str>` parameter (tied to
+    the same lifetime as the engine reference itself — a pdfium-render
+    constraint, not a choice) threaded through `commands::pdf`'s
+    `PdfEngineRequest` variants and `import_pdf_document`.
+    - Verified against a real encrypted PDF, not just a mocked error path:
+      committed a tiny fixture (`crates/pdf_core/tests/fixtures/
+      encrypted.pdf`, one blank page, password `secret123`, generated with
+      `pypdf` since no PDF-encryption tool was already available in this
+      environment) and a new real-engine test confirms opening it with no
+      password or the wrong one both return `PasswordRequired`, and the
+      correct password opens it successfully.
+    - SEC-02 (secure credential handling) fell out of SEC-01 needing
+      somewhere to keep a password after the user types it once — without
+      it, every thumbnail render and every export of an encrypted document
+      would need the password re-supplied on every single IPC call, which
+      is unworkable once autosave (REL-01) is calling
+      `export_document_flattened_pdf` on a timer with no user present to
+      prompt. New `crates/secrets` crate wraps the `keyring` crate
+      (Secret Service/GNOME Keyring on Linux, Keychain on macOS,
+      Credential Manager on Windows) — a password lives in the OS
+      keychain, keyed by document id, never in `mds_rebar.sqlite` (which
+      would otherwise leak it into `RecoveryState` snapshots and any future
+      backup/sync of that file too).
+    - **Found and fixed a real bug while verifying this, not just an
+      environment quirk**: a bare `keyring = "3"` dependency compiled
+      clean and every call returned `Ok(())`/no error, but a fresh
+      `keyring::Entry` could never read back what a *different* fresh
+      `Entry` had just stored for the same service+key — confirmed with a
+      throwaway debug binary (`cargo run --example`, since deleted) that
+      isolated it to exactly that: same-`Entry` round trip worked, a
+      second independent `Entry::new()` got `NoEntry`. Root cause: keyring
+      3.x restructured to ship **no default backend at all** — a bare
+      `keyring = "3"` silently compiles against no real platform store.
+      Confirmed a real, working `org.freedesktop.secrets` D-Bus service
+      was reachable in this environment (`dbus-send` introspection) before
+      concluding it was a crate-configuration issue rather than an
+      environment one. Fixed with explicit per-OS backend features in
+      `crates/secrets/Cargo.toml` (`sync-secret-service` + `crypto-rust`
+      on Linux, `apple-native` on macOS, `windows-native` on Windows); the
+      real round trip was reverified working afterward with the same
+      debug binary before it was deleted. This means every prior "OS
+      keychain" mention anywhere in this doc set before today didn't
+      actually have a working implementation to point to — this is the
+      first one.
+    - Verified: `cargo test -p secrets` — 5/5 passing against the real,
+      running `gnome-keyring-daemon` in this environment (store/get round
+      trip, overwrite replaces the old value, delete then get returns
+      none, get/delete of a never-stored id are not errors). `cargo test
+      -p pdf_core` — 11/11 passing (10 prior + the new encrypted-PDF
+      test), still reproducibly serialized via the `Mutex` from the
+      EXPORT-01 pass. `cargo check -p secrets -p pdf_core -p app` — clean.
+      `npm run build` — clean, no type errors. **NOT verified**: same
+      live-IPC gap as every feature so far — actually importing a real
+      password-protected PDF and confirming a later thumbnail render
+      doesn't re-prompt, through a signed-in `npm run tauri dev` session,
+      is still Naveen's check to run. Also unverified: the macOS/Windows
+      keychain backends (no such machine available in this environment) —
+      only the Linux path has been exercised against a real OS keychain.
+  - **RFI-03 drawing revision tracking (2026-09-13)**: the registry row's
+    own note ("Overlaps DocumentVersion") turned out to be exactly right —
+    `document::create_version`/`list_versions` (DOC-02) already had all
+    the domain logic and were IPC-wired, just with no frontend UI and no
+    way to produce the snapshot file `create_version` needs (it only
+    records a `file_snapshot_path` someone else already wrote). New
+    `save_document_revision` command does both steps as one user action:
+    writes a flattened snapshot (reusing `export_document_flattened_pdf`
+    a fourth time now — REL-01's autosave and EXPORT-03's handoff package
+    were the first two reuses, this is the third call site) to
+    `data_dir/versions/`, then calls `create_version` with that path. "Open
+    a past revision" needed no new backend command at all: the frontend
+    already has `file_snapshot_path` from `list_document_versions`, and
+    `@tauri-apps/plugin-opener` (already a dependency, already registered
+    on the Rust side for `opener:default` capability) hands that path
+    straight to the OS's default PDF viewer via `openPath`.
+    - Verified: `cargo check -p app` — clean. No new domain crate or
+      migration — nothing new to unit-test in isolation, since this is
+      pure composition of `document::create_version` (already covered by
+      `cargo test -p document`) and `export::export_flattened_pdf`
+      (already covered by `cargo test -p export`/`-p pdf_core`). `npm run
+      build` — clean, no type errors (21 modules now, up from 20, for the
+      new `plugin-opener` import). **NOT verified**: same live-IPC gap as
+      every feature so far — actually saving a revision and then opening
+      it in a real PDF viewer through a signed-in `npm run tauri dev`
+      session is still Naveen's check to run; this is also the first
+      feature depending on the `opener:default` Tauri capability actually
+      permitting an arbitrary local file path (not just a URL) to be
+      opened, which hasn't been exercised at all yet.
+  - **EXPORT-02 print (2026-09-13)**: the last row in the registry with a
+    real design question left ("Print" could mean a native in-app print
+    dialog, a webview `window.print()`, or handing a file to something
+    else). Ruled out a native print dialog — nothing in this codebase
+    talks to platform print APIs, and building that from scratch for one
+    feature this late wasn't justified. Ruled out `window.print()` too:
+    the webview never renders the drawing at print quality — the canvas is
+    a markup-*editing* surface (an `<img>` thumbnail plus an SVG overlay
+    for interaction), not a print-ready page. Landed on the same move as
+    RFI-03's "Open…": produce a fresh flattened snapshot (current markups
+    included, `export_document_flattened_pdf` again — the fourth call
+    site now, after REL-01/EXPORT-03/RFI-03) written to the system temp
+    directory rather than `data_dir` (a print snapshot is disposable, not
+    a kept artifact like a `RecoveryState`/`DocumentVersion` one), then
+    hand it to the OS's default PDF viewer via `openPath` — that viewer's
+    own Print command is the actual print dialog (printer, page range,
+    paper size), which this app doesn't reimplement.
+    - Verified: `cargo check -p app` — clean. No new domain logic, no new
+      dependency — pure reuse of already-tested `export_document_
+      flattened_pdf` plus the `plugin-opener` wiring RFI-03 just added.
+      `npm run build` — clean, no type errors. **NOT verified**: same
+      live-IPC gap as every feature so far, plus the same open question
+      RFI-03 already flagged about whether `opener:default` actually
+      permits opening an arbitrary local file path in this app's current
+      capability config — worth checking both in the same session, since
+      a fix (if one's needed) would apply to both.
+  - **First real `npm run tauri dev` run, and a genuine bug it caught
+    (2026-09-13)**: every feature above this line had only ever been
+    verified via `cargo test`/`cargo check`/`npm run build` — every "NOT
+    verified" note calling out the live-IPC gap was real. This pass
+    actually ran the app for the first time this session.
+    - The first attempt failed immediately: `symbol lookup error: /snap/
+      core20/current/lib/x86_64-linux-gnu/libpthread.so.0: undefined
+      symbol: __libc_pthread_init, version GLIBC_PRIVATE`. Traced to this
+      shell's environment being a VS Code-*snap* integrated terminal
+      (`code` itself installed as a snap — confirmed via `env | grep -i
+      snap` showing `GTK_PATH`/`GIO_MODULE_DIR`/`LOCPATH` etc. all
+      pointing into `/snap/code/255/...`), which leaks snap library search
+      paths into child processes and made the dynamically-linked `app`
+      binary resolve `libpthread` from `/snap/core20` (an older/different
+      glibc ABI) instead of the system's own. Confirmed by re-running the
+      exact same binary through `env -i` with only `PATH`/`HOME`/
+      `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`/
+      `DBUS_SESSION_BUS_ADDRESS` — it started cleanly and stayed running.
+      **This is an environment artifact of this dev session's terminal,
+      not an app bug** — worth knowing about if Naveen ever launches
+      `npm run tauri dev` from a VS Code (snap) integrated terminal
+      himself, but a normal terminal shouldn't hit it.
+    - With that worked around, the app actually started and stayed
+      running (Vite dev server up, `cargo run` succeeded, process alive
+      with no error output). Since this session has no way to interact
+      with a native GTK/Wayland window (`claude-in-chrome` only reaches
+      Chrome tabs; no screenshot tool was available — `xwd` failed with
+      `BadMatch` since this is a real Wayland session, and no
+      `grim`/ImageMagick/`wmctrl` were installed either), a full UI
+      click-through still wasn't possible from here — but the app's own
+      on-disk state was inspectable directly.
+    - **That inspection caught a real, serious bug**: this machine
+      already had a local database at `~/.local/share/com.mdsrebar.app/
+      mds_rebar.sqlite`, created earlier the same day (`10:58` per its
+      mtime, hours before RFI-01/02 was built). `PRAGMA user_version` was
+      `1`, and the `rfi` table was completely absent. Root cause: `rfi`
+      had been added by editing `0001_initial.sql` directly rather than
+      as a new migration (reasoning at the time: "no deployed instances
+      yet, no history to preserve" — see the RFI-01/02 entry above). That
+      reasoning was wrong: this local database *was* a deployed instance,
+      already at version 1 before `rfi` existed, and `rusqlite_migration`
+      tracks progress by `user_version`, not by diffing SQL text — it
+      never re-runs a migration index it already recorded as applied, no
+      matter what gets added to that file's content afterward. Every
+      `cargo test` in this session passed anyway because they all migrate
+      a fresh `:memory:` database, which naturally never hits this.
+    - Fixed properly, not just patched around: added `0002_add_rfi.sql`
+      (`CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS`, safe
+      whether or not 0001 already created `rfi`) and registered it in
+      `mds_db::migrations()`. Added a regression test
+      (`to_latest_adds_rfi_to_a_database_stuck_at_version_1`) that
+      simulates the exact stuck-at-version-1 state (migrate fresh, drop
+      `rfi`, rewind `user_version` to 1 by hand) and confirms `to_latest()`
+      repairs it. Repaired the actual affected local database directly
+      (via a throwaway `cargo run --example`, since deleted) and confirmed
+      by reopening it with Python's `sqlite3`: `user_version` is now `2`
+      and `rfi` exists. Documented in `docs/database/README.md` under
+      "Migrations are additive from here on" as a standing rule for every
+      future schema change.
+    - Verified: `cargo test -p mds_db` — 4/4 passing (the pre-existing 3
+      plus the new regression test). The real local database, directly
+      inspected before and after: `rfi` absent → `user_version` rewound
+      to 1 → migrated → `rfi` present, `user_version = 2`. **Still NOT
+      verified**: actual UI interaction (drawing a markup, filing an RFI,
+      etc.) — this pass closed the "does it even start, and is the schema
+      actually right" gap, which turned out to hide a real bug, but a
+      full click-through still needs either a screenshot-capable tool in
+      this environment or Naveen doing it himself.
+  - **Structured logging + TAKE-05's Excel half (2026-09-14)**: closed
+    Section 18's structured-logging item — every `#[tauri::command]` now
+    carries `#[tracing::instrument(err)]` (state/passwords explicitly
+    skipped), writing human-readable spans to stdout and JSON lines to a
+    daily-rotating file under `data_dir/logs/`. Also finished TAKE-05:
+    `crates/takeoff::export_xlsx` writes a real `.xlsx` via
+    `rust_xlsxwriter` (numeric columns as numbers, not strings, so
+    totals/costs are usable in-sheet) alongside the existing CSV export.
+    - Verified: full workspace `cargo test` — all crates passing, adds 2
+      new `takeoff` tests that read the written workbook back with
+      `calamine` rather than just checking the writer didn't error.
+      `cargo check -p app` / `npm run build` — clean.
+  - **SEC-03 enforcement, closing the last open MVP feature-registry row
+    (2026-09-14)**: per this doc's own gate ("backlog work shouldn't start
+    before REL/SEC/large-PDF/click-through close"), this was the one
+    remaining non-BACKLOG row still short of IMPLEMENTED, so it came next
+    instead of Backlog (Overlay & Comparison, etc.). `crates/project`
+    already stored membership and could answer `is_member`; nothing
+    enforced it against an action. Added: `project::user_can_access_document`
+    plus one `document_id_for_*` resolver per entity type (page, markup,
+    markup_comment, measurement, rfi, recovery_state, takeoff_item), each
+    a single join back to `document.project_id` — nullable in the schema,
+    so a project-less document has no membership boundary and stays open
+    to any signed-in user, same as every feature's behavior before this
+    existed; an id that doesn't resolve at all is let through too, since
+    the real operation still 404s on it. `AppState` gained one
+    `current_user` slot (not a session map — one Tauri process is already
+    one desktop session for one person, the same reasoning already used
+    for scoping `MARK-06`'s undo stacks per page); a new `authz` module in
+    `app/src-tauri` reads it and denies with a plain string error when the
+    resolved project says no. Every document/page/markup/measurement/rfi/
+    recovery/takeoff command now calls one `authz::require_*` before
+    touching the database.
+    - Caught and fixed one real bug before it shipped, not after: the
+      obvious way to wire this — set `current_user` as a side effect of
+      `get_user_by_email` — breaks a second, unrelated use of that same
+      command: `ProjectsPanel`'s "add member by email" flow already calls
+      `getUserByEmail` to resolve a teammate's id to invite them, and that
+      is emphatically not a sign-in action. Fixed by keeping
+      `create_user`/`get_user_by_email` pure identity lookups and adding
+      an explicit `set_current_user` command the frontend's `signIn` calls
+      once it has decided which `UserDto` is actually signing in; a new
+      `sign_out` command clears the slot. No credential check gates
+      `set_current_user` — consistent with the rest of this app, sign-in
+      is still "type a known email," so this isn't a new hole, just where
+      membership checks now read the result from.
+    - Deliberately NOT covered: a takeoff item created without a
+      `measurement_id` (TAKE-02's link is optional) has no reachable
+      document/project to check against, same gap `takeoff::list_for_document`
+      already had; member-management commands (add/remove/list) require
+      the caller to already be *a* project member, not specifically
+      `"owner"` — COLLAB-01's role is still free text with no confirmed
+      permission tiers, so this doesn't invent one.
+    - Verified: `cargo test -p project` — 12/12 passing (adds 3 tests:
+      every resolver's join from a real fixture, the takeoff-item-without-
+      a-measurement gap, and membership-gated vs. project-less document
+      access). `cargo check -p app` — clean, no warnings. `npm run build`
+      — clean. **NOT verified**: real click-through (same outstanding gap
+      as every other feature) — in particular, that a legitimate signed-in
+      member is never wrongly denied by one of these checks in the actual
+      running app, only that the logic is correct against fixtures.
+  - **RFI-04 revision comparison/overlay, first Backlog item taken up
+    (2026-09-14)**: with SEC-03 closed, every non-BACKLOG MVP row was
+    IMPLEMENTED, so per this doc's own gate ("backlog work shouldn't start
+    before REL/SEC/etc. close") the next phase moved to Backlog, in its
+    stated priority order — Overlay & Comparison first, which is exactly
+    what RFI-04 already was in `docs/features/FEATURE_REGISTRY.md`
+    (previously "Proposed deferral — confirm with Naveen"; that
+    confirmation never came either way, so this took the registry's
+    default of building it rather than leaving it in limbo indefinitely).
+    Scoped deliberately narrow: a **pixel-diff** overlay, not a structural
+    diff — `pdf_core::render_comparison_overlay` takes two already-
+    rendered page PNGs (typically the same page index from two
+    `DocumentVersion` flattened snapshots, RFI-03's existing artifact) and
+    highlights pixels differing beyond a small tolerance in red, fading
+    everything else toward white. Pure image math, no PDFium involved, so
+    it's independently testable against synthetic PNGs — same reasoning
+    already used for `tile_grid`. Added `document::get_version` (fetch one
+    `DocumentVersion` by id — `list_versions` existed for browsing, nothing
+    existed for "the two specific ones the user picked"). Wired as
+    `compare_document_versions` in `commands::pdf` (reuses the same
+    `render_thumbnail` PDF-engine-thread primitive `render_page_thumbnail`
+    already uses — a snapshot is a plain unencrypted flattened copy, so
+    unlike the original source PDF there's no password to look up here),
+    gated by the same SEC-03 `require_document_access` check as everything
+    else. Frontend: a "Compare revisions" control in `DocumentVersionsPanel`
+    — pick two versions + a page number, get back an overlay image.
+    - Deliberately NOT attempted: aligning/resizing when the two renders
+      are different pixel dimensions (a real page-size change between
+      revisions) — returns a typed `ComparisonDimensionMismatch` error
+      instead of silently stretching one to match, since a genuine size
+      change is itself worth surfacing, not hiding behind a diff that
+      would misrepresent it. No structural/vector diff (matching up a
+      shape that moved or resized) — this only sees pixels, which is a
+      real but simpler capability than what a CAD-style revision-cloud
+      tool does; upgrading to a structural diff would need markup-level
+      geometry comparison, not image processing, and wasn't attempted here.
+    - Verified: `cargo test -p pdf_core` — adds 3 tests (highlights only
+      the changed region on a synthetic image, produces no highlight when
+      nothing changed, rejects mismatched dimensions with the typed
+      error); `cargo test -p document` — adds 1 test (`get_version` found
+      by id / `VersionNotFound` on an unknown one). Full workspace
+      `cargo test` — 26/26 test blocks passing, no regressions.
+      `cargo check -p app` / `npm run build` — clean. **NOT verified**:
+      real click-through (same outstanding gap as every feature above) —
+      in particular, whether the chosen highlight color/fade actually
+      reads well against a real construction drawing rather than the flat
+      synthetic test colors used here.
+  - **VIEW-04 synthetic large/vector-heavy render+tile validation
+    (2026-09-14)**: with SEC-03 and RFI-04 both closed, VIEW-04 was the
+    last non-BACKLOG row left `NOT_STARTED` (the Section 6 spike had
+    explicitly SKIPPED its "#3 render large/vector-heavy page" check for
+    lack of a real sample). Rather than leave it open indefinitely waiting
+    on Naveen to supply a real 100+ page construction drawing, built a
+    synthetic stand-in and measured against it — a new test,
+    `crates/pdf_core/tests/large_pdf_performance.rs`, generates a 30-page
+    ARCH-D-sized PDF (raw PDF bytes written directly at test time, no
+    committed fixture and no new PDF-authoring dependency — this workspace
+    only had read/render PDF deps before this) with ~1200 independently-
+    stroked line segments and ~80 text labels per page, meant to
+    approximate a rebar sheet's line/label density without claiming to be
+    one, then times real `PdfiumEngine` full-page renders and
+    `TileCache`-mediated tile renders against it.
+    - **Caught and corrected a real false alarm during this same pass**:
+      the first run (`cargo test -p pdf_core`, this workspace's normal
+      debug-build invocation) measured ~13s/tile and briefly looked like
+      confirmation that the crate's already-documented "re-rasterizes the
+      whole page per tile" limitation was a severe, shipping-blocking
+      problem. Re-running the identical test under `--release` (isolating
+      build profile as the only variable) gave ~250ms/tile — a ~30-50x
+      gap almost certainly from the `image` crate's PNG encode/decode path
+      (which every tile render exercises) being far slower unoptimized.
+      The debug numbers were real, just not representative of what a
+      compiled Tauri release binary will do; the test file's own doc
+      comment and `docs/00_SCOPE_REALITY_CHECK.md` now both record this
+      explicitly so a future debug-mode run of the same test doesn't
+      re-trigger the same false alarm. Also found: a real, reproducible
+      ~4.3s one-time first-render warm-up cost per process (every render
+      after the first was 80-85ms, including of different pages) — a
+      genuine finding worth the real app accounting for (e.g. a throwaway
+      warm-up render at startup), not something this pass attempted to fix.
+    - Test bounds are deliberately loose (debug-build tolerant, not tight
+      performance targets) — the point was catching a catastrophic
+      regression, not chasing a millisecond number; tile sample size was
+      also cut from an initial 16 down to 4 (still enough for a real
+      avg/tile number and to exercise `TileCache`'s hit path meaningfully)
+      once the debug-mode cost of 16 real tile renders (3+ minutes) made
+      clear that was needlessly slow for a suite this workspace runs
+      routinely.
+    - Explicitly NOT attempted: fixing `render_tile_to_png`'s "full page
+      re-render per tile" behavior (e.g. via `pdfium-render`'s
+      transformation-matrix + fixed-target-size API instead of
+      `clip()` — confirmed by reading the vendored crate source that
+      `clip()` still allocates a full-page-sized bitmap as the doc comment
+      already claimed, but a small fixed-size bitmap combined with a
+      custom transform matrix looks like it would actually rasterize only
+      the tile region; not attempted because getting the matrix math wrong
+      risks silently-corrupted tiles that pixel-count assertions wouldn't
+      catch, and this environment has no way to visually verify rendered
+      output). Recorded here as the concrete next step if/when tile-level
+      performance actually becomes a bottleneck against real content.
+    - Verified: `cargo test -p pdf_core --test large_pdf_performance` —
+      1/1 passing (both debug and `--release`, numbers above are from
+      real runs of each, not estimated). Full workspace
+      (`cargo test --workspace --exclude app`) — 116 test blocks passing,
+      no regressions. **NOT verified**: real construction-drawing content
+      (this is a synthetic proxy, not the Section 6 sample Naveen still
+      needs to supply), and whether 250ms/tile is actually acceptable once
+      real tile-based zoom/pan interaction is wired into the UI (VIEW-01/02
+      currently re-request a whole-page render at a new zoom width, not
+      individual tiles, so this pipeline's tile path has no real caller
+      yet either).
+  - **Top-level README, first-time product tour, cross-platform pdfium path
+    fix (2026-09-14)**: requested directly by Naveen — complete run-on-
+    another-machine setup docs, plus an in-app first-time tour.
+    - `README.md` (repo root, previously only `app/README.md`'s default
+      Tauri scaffold text existed): prerequisites per OS, the
+      `libpdfium` fetch step (now genuinely cross-platform, see below),
+      `npm run tauri dev`/test/build commands, a troubleshooting section
+      built from real problems hit earlier this project (the VS Code snap
+      sandbox `libpthread` crash, the keyring/Secret-Service requirement,
+      the pdfium-not-found error), and an honest "Known limitations"
+      section (Linux-only verified, ADR-001 still provisional, VIEW-04
+      synthetic-only, COLLAB-03 gated, real click-through mostly
+      unverified) rather than presenting this as more finished than the
+      rest of this doc already shows it to be.
+    - **Found a real, previously-unnoticed Linux-only bug while writing the
+      "other systems" instructions**: every `libpdfium` path in this
+      workspace (`app/src-tauri`'s `dev_pdfium_lib_path`, `pdf_core`'s test
+      helper, `pdf_engine_spike`'s own `main.rs`) hardcoded the `.so`
+      filename, so even a correctly-fetched macOS `.dylib` or Windows
+      `.dll` would never have been found — this had been invisible because
+      the project has only ever run on Linux. Fixed with a new
+      `pdf_core::platform_library_filename()` (thin wrapper over
+      `pdfium-render`'s own `Pdfium::pdfium_platform_library_name()`, which
+      already does exactly this — not reinvented), used by all three call
+      sites; `app/src-tauri` didn't previously depend on `pdfium-render`
+      directly and still doesn't, only on `pdf_core`. Genuinely unverified
+      beyond Linux still (no macOS/Windows machine in this environment),
+      but the path-resolution bug that would have silently blocked it is
+      now fixed rather than latent.
+    - First-time tour: new `app/src/Tour.tsx`, a description-only modal
+      walkthrough (8 steps: welcome, sign-in/projects, import/view,
+      markup/measure, takeoff, RFI/revisions, autosave/export, done) —
+      deliberately not DOM-anchored spotlighting, since most of what it
+      describes (projects, documents, the canvas, takeoff, RFIs) only
+      exists conditionally after sign-in/project/document selection, so
+      real element-anchoring would need faking that state for early steps.
+      Opens automatically on first launch (`localStorage` flag,
+      `mds-rebar:tour-seen-v1`) and is always replayable via a "Take the
+      tour" button added to the header. Also fixed a stale line in the
+      header's own subtitle text ("Zoom/pan isn't built yet") left over
+      from before VIEW-01/02 landed.
+    - Verified: full workspace `cargo test --workspace --exclude app` —
+      still 0 failures after the `platform_library_filename()` change,
+      including `pdf_core`'s 14 real-engine tests (confirms the new
+      platform-aware path resolution still finds the same Linux binary
+      correctly, not just that it compiles). `cargo check -p app` and
+      `cargo build -p pdf_engine_spike` — clean. `npm run build` — clean,
+      22 modules (up from 21, for `Tour.tsx`). Headless-Chrome screenshot
+      of `npm run dev` confirmed the tour renders and opens automatically
+      on first load, matching the app's existing visual style. **NOT
+      verified**: the tour's Next/Back/Skip interaction and the
+      seen-once-then-hidden behavior (only the initial render was
+      screenshotted, not click-through) — same outstanding live-IPC/
+      interaction-testing gap as every other frontend feature in this
+      project; also, the README's macOS/Windows steps themselves remain
+      unverified on real hardware, only the code path they depend on.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must
