@@ -16,6 +16,9 @@ pub fn create_takeoff_item(
     notes: Option<String>,
 ) -> Result<TakeoffItemDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if let Some(measurement_id) = measurement_id.as_deref() {
+        crate::authz::require_measurement_access(&conn, &state, measurement_id)?;
+    }
     takeoff::create(
         &conn,
         &description,
@@ -33,6 +36,7 @@ pub fn create_takeoff_item(
 #[tracing::instrument(skip(state), err)]
 pub fn get_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<TakeoffItemDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_takeoff_item_access(&conn, &state, &id)?;
     takeoff::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
@@ -40,6 +44,7 @@ pub fn get_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<Tak
 #[tracing::instrument(skip(state), err)]
 pub fn list_takeoff_for_measurement(state: tauri::State<AppState>, measurement_id: String) -> Result<Vec<TakeoffItemDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_measurement_access(&conn, &state, &measurement_id)?;
     takeoff::list_for_measurement(&conn, &measurement_id)
         .map(|items| items.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -49,6 +54,7 @@ pub fn list_takeoff_for_measurement(state: tauri::State<AppState>, measurement_i
 #[tracing::instrument(skip(state), err)]
 pub fn list_takeoff_for_document(state: tauri::State<AppState>, document_id: String) -> Result<Vec<TakeoffItemDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     takeoff::list_for_document(&conn, &document_id)
         .map(|items| items.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -65,6 +71,7 @@ pub fn update_takeoff_item(
     notes: Option<String>,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_takeoff_item_access(&conn, &state, &id)?;
     takeoff::update(&conn, &id, quantity, &unit, cost_per_unit, notes.as_deref()).map_err(|e| e.to_string())
 }
 
@@ -72,6 +79,7 @@ pub fn update_takeoff_item(
 #[tracing::instrument(skip(state), err)]
 pub fn delete_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_takeoff_item_access(&conn, &state, &id)?;
     takeoff::delete(&conn, &id).map_err(|e| e.to_string())
 }
 
@@ -82,6 +90,7 @@ pub fn delete_takeoff_item(state: tauri::State<AppState>, id: String) -> Result<
 #[tracing::instrument(skip(state), err)]
 pub fn export_takeoff_csv(state: tauri::State<AppState>, document_id: String) -> Result<String, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     let items = takeoff::list_for_document(&conn, &document_id).map_err(|e| e.to_string())?;
     Ok(takeoff::export_csv(&items))
 }
@@ -99,6 +108,7 @@ pub fn export_takeoff_xlsx(
     output_path: String,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     let items = takeoff::list_for_document(&conn, &document_id).map_err(|e| e.to_string())?;
     let bytes = takeoff::export_xlsx(&items).map_err(|e| e.to_string())?;
     std::fs::write(&output_path, bytes).map_err(|e| e.to_string())

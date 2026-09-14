@@ -41,6 +41,7 @@ pub fn calibrate_scale(
     calibrated_by: Option<String>,
 ) -> Result<ScaleDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     measurement::calibrate(
         &conn,
         &page_id,
@@ -58,6 +59,7 @@ pub fn calibrate_scale(
 #[tracing::instrument(skip(state), err)]
 pub fn latest_scale_for_page(state: tauri::State<AppState>, page_id: String) -> Result<Option<ScaleDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     measurement::latest_scale_for_page(&conn, &page_id)
         .map(|scale| scale.map(Into::into))
         .map_err(|e| e.to_string())
@@ -75,6 +77,7 @@ pub fn record_length(
     label: Option<String>,
 ) -> Result<MeasurementDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let unit = parse_length_unit(&unit)?;
     measurement::record_length(&conn, &page_id, &scale_id, Point::new(p1.0, p1.1), Point::new(p2.0, p2.1), unit, label.as_deref())
         .map(Into::into)
@@ -92,6 +95,7 @@ pub fn record_area(
     label: Option<String>,
 ) -> Result<MeasurementDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let unit = parse_area_unit(&unit)?;
     let points: Vec<Point> = points.into_iter().map(|(x, y)| Point::new(x, y)).collect();
     measurement::record_area(&conn, &page_id, &scale_id, &points, unit, label.as_deref())
@@ -108,6 +112,7 @@ pub fn record_count(
     label: Option<String>,
 ) -> Result<MeasurementDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let markers: Vec<Point> = markers.into_iter().map(|(x, y)| Point::new(x, y)).collect();
     measurement::record_count(&conn, &page_id, &markers, label.as_deref())
         .map(Into::into)
@@ -118,6 +123,7 @@ pub fn record_count(
 #[tracing::instrument(skip(state), err)]
 pub fn get_measurement(state: tauri::State<AppState>, id: String) -> Result<MeasurementDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_measurement_access(&conn, &state, &id)?;
     measurement::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
@@ -125,6 +131,7 @@ pub fn get_measurement(state: tauri::State<AppState>, id: String) -> Result<Meas
 #[tracing::instrument(skip(state), err)]
 pub fn list_measurements_by_page(state: tauri::State<AppState>, page_id: String) -> Result<Vec<MeasurementDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     measurement::list_by_page(&conn, &page_id)
         .map(|measurements| measurements.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -134,5 +141,6 @@ pub fn list_measurements_by_page(state: tauri::State<AppState>, page_id: String)
 #[tracing::instrument(skip(state), err)]
 pub fn delete_measurement(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_measurement_access(&conn, &state, &id)?;
     measurement::delete(&conn, &id).map_err(|e| e.to_string())
 }

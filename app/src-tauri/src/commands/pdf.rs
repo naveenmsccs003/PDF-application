@@ -269,6 +269,10 @@ pub fn import_pdf_document(
     project_id: Option<String>,
     password: Option<String>,
 ) -> Result<DocumentDto, String> {
+    if let Some(project_id) = project_id.as_deref() {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_project_membership(&conn, &state, project_id)?;
+    }
     let sizes = get_page_sizes(&state, &path, password.as_deref())?;
     let fake_document = PageSizesDocument { sizes };
 
@@ -301,6 +305,7 @@ pub fn render_page_thumbnail(
 ) -> Result<String, String> {
     let file_path = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
         document::get_document(&conn, &document_id).map_err(|e| e.to_string())?.file_path
     };
     let password = stored_pdf_password(&document_id);
@@ -315,15 +320,23 @@ pub fn render_page_thumbnail(
 /// re-importing. Useful if the password wasn't known/entered at import
 /// time, or needs to be corrected.
 #[tauri::command]
-#[tracing::instrument(skip(password), err)]
-pub fn set_document_pdf_password(document_id: String, password: String) -> Result<(), String> {
+#[tracing::instrument(skip(state, password), err)]
+pub fn set_document_pdf_password(state: tauri::State<AppState>, document_id: String, password: String) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     secrets::store_pdf_password(&document_id, &password).map_err(|e| e.to_string())
 }
 
 /// SEC-02: forgets any password stored for `document_id`.
 #[tauri::command]
-#[tracing::instrument(err)]
-pub fn clear_document_pdf_password(document_id: String) -> Result<(), String> {
+#[tracing::instrument(skip(state), err)]
+pub fn clear_document_pdf_password(state: tauri::State<AppState>, document_id: String) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     secrets::delete_pdf_password(&document_id).map_err(|e| e.to_string())
 }
 
@@ -369,5 +382,9 @@ pub fn export_flattened_pdf(
     document_id: String,
     output_path: String,
 ) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     export_document_flattened_pdf(&state, &document_id, &output_path)
 }

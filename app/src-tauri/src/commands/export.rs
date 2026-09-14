@@ -25,6 +25,7 @@ pub fn export_handoff_package(
 ) -> Result<(), String> {
     let title = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
         document::get_document(&conn, &document_id).map_err(|e| e.to_string())?.title
     };
     let name = sanitize_filename_component(&title);
@@ -61,6 +62,10 @@ pub fn export_handoff_package(
 #[tauri::command]
 #[tracing::instrument(skip(state), err)]
 pub fn print_document(state: tauri::State<AppState>, document_id: String) -> Result<String, String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?

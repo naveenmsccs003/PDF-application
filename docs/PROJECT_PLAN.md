@@ -661,6 +661,67 @@ Phase 0 starts until the table above is clear.
       actually right" gap, which turned out to hide a real bug, but a
       full click-through still needs either a screenshot-capable tool in
       this environment or Naveen doing it himself.
+  - **Structured logging + TAKE-05's Excel half (2026-09-14)**: closed
+    Section 18's structured-logging item — every `#[tauri::command]` now
+    carries `#[tracing::instrument(err)]` (state/passwords explicitly
+    skipped), writing human-readable spans to stdout and JSON lines to a
+    daily-rotating file under `data_dir/logs/`. Also finished TAKE-05:
+    `crates/takeoff::export_xlsx` writes a real `.xlsx` via
+    `rust_xlsxwriter` (numeric columns as numbers, not strings, so
+    totals/costs are usable in-sheet) alongside the existing CSV export.
+    - Verified: full workspace `cargo test` — all crates passing, adds 2
+      new `takeoff` tests that read the written workbook back with
+      `calamine` rather than just checking the writer didn't error.
+      `cargo check -p app` / `npm run build` — clean.
+  - **SEC-03 enforcement, closing the last open MVP feature-registry row
+    (2026-09-14)**: per this doc's own gate ("backlog work shouldn't start
+    before REL/SEC/large-PDF/click-through close"), this was the one
+    remaining non-BACKLOG row still short of IMPLEMENTED, so it came next
+    instead of Backlog (Overlay & Comparison, etc.). `crates/project`
+    already stored membership and could answer `is_member`; nothing
+    enforced it against an action. Added: `project::user_can_access_document`
+    plus one `document_id_for_*` resolver per entity type (page, markup,
+    markup_comment, measurement, rfi, recovery_state, takeoff_item), each
+    a single join back to `document.project_id` — nullable in the schema,
+    so a project-less document has no membership boundary and stays open
+    to any signed-in user, same as every feature's behavior before this
+    existed; an id that doesn't resolve at all is let through too, since
+    the real operation still 404s on it. `AppState` gained one
+    `current_user` slot (not a session map — one Tauri process is already
+    one desktop session for one person, the same reasoning already used
+    for scoping `MARK-06`'s undo stacks per page); a new `authz` module in
+    `app/src-tauri` reads it and denies with a plain string error when the
+    resolved project says no. Every document/page/markup/measurement/rfi/
+    recovery/takeoff command now calls one `authz::require_*` before
+    touching the database.
+    - Caught and fixed one real bug before it shipped, not after: the
+      obvious way to wire this — set `current_user` as a side effect of
+      `get_user_by_email` — breaks a second, unrelated use of that same
+      command: `ProjectsPanel`'s "add member by email" flow already calls
+      `getUserByEmail` to resolve a teammate's id to invite them, and that
+      is emphatically not a sign-in action. Fixed by keeping
+      `create_user`/`get_user_by_email` pure identity lookups and adding
+      an explicit `set_current_user` command the frontend's `signIn` calls
+      once it has decided which `UserDto` is actually signing in; a new
+      `sign_out` command clears the slot. No credential check gates
+      `set_current_user` — consistent with the rest of this app, sign-in
+      is still "type a known email," so this isn't a new hole, just where
+      membership checks now read the result from.
+    - Deliberately NOT covered: a takeoff item created without a
+      `measurement_id` (TAKE-02's link is optional) has no reachable
+      document/project to check against, same gap `takeoff::list_for_document`
+      already had; member-management commands (add/remove/list) require
+      the caller to already be *a* project member, not specifically
+      `"owner"` — COLLAB-01's role is still free text with no confirmed
+      permission tiers, so this doesn't invent one.
+    - Verified: `cargo test -p project` — 12/12 passing (adds 3 tests:
+      every resolver's join from a real fixture, the takeoff-item-without-
+      a-measurement gap, and membership-gated vs. project-less document
+      access). `cargo check -p app` — clean, no warnings. `npm run build`
+      — clean. **NOT verified**: real click-through (same outstanding gap
+      as every other feature) — in particular, that a legitimate signed-in
+      member is never wrongly denied by one of these checks in the actual
+      running app, only that the logic is correct against fixtures.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

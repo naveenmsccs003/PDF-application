@@ -140,6 +140,12 @@ export const createUser = (email: string, displayName: string) =>
 
 export const getUserByEmail = (email: string) => invoke<UserDto>("get_user_by_email", { email });
 
+// SEC-03: session operations, separate from the identity lookups above —
+// see `commands::project`'s module doc for why.
+export const setCurrentUser = (userId: string) => invoke<void>("set_current_user", { userId });
+
+export const signOut = () => invoke<void>("sign_out");
+
 export const createProject = (name: string, createdBy: string) =>
   invoke<ProjectDto>("create_project", { name, createdBy });
 

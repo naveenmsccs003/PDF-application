@@ -20,6 +20,10 @@ const MAX_SNAPSHOTS_PER_DOCUMENT: usize = 5;
 #[tauri::command]
 #[tracing::instrument(skip(state), err)]
 pub fn autosave_snapshot(state: tauri::State<AppState>, document_id: String) -> Result<RecoverySnapshotDto, String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     let snapshot_dir = state.data_dir.join("recovery");
     std::fs::create_dir_all(&snapshot_dir).map_err(|e| e.to_string())?;
 
@@ -46,6 +50,7 @@ pub fn autosave_snapshot(state: tauri::State<AppState>, document_id: String) -> 
 #[tracing::instrument(skip(state), err)]
 pub fn list_recovery_snapshots(state: tauri::State<AppState>, document_id: String) -> Result<Vec<RecoverySnapshotDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     recovery::list_by_document(&conn, &document_id)
         .map(|snapshots| snapshots.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -59,6 +64,7 @@ pub fn list_recovery_snapshots(state: tauri::State<AppState>, document_id: Strin
 pub fn restore_recovery_snapshot(state: tauri::State<AppState>, id: String, output_path: String) -> Result<(), String> {
     let snapshot_path = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_recovery_snapshot_access(&conn, &state, &id)?;
         recovery::get(&conn, &id).map_err(|e| e.to_string())?.snapshot_path
     };
     std::fs::copy(&snapshot_path, &output_path).map_err(|e| e.to_string())?;
@@ -70,6 +76,7 @@ pub fn restore_recovery_snapshot(state: tauri::State<AppState>, id: String, outp
 #[tracing::instrument(skip(state), err)]
 pub fn discard_recovery_snapshot(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_recovery_snapshot_access(&conn, &state, &id)?;
     let deleted = recovery::delete(&conn, &id).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&deleted.snapshot_path);
     Ok(())

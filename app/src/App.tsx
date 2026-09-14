@@ -48,11 +48,24 @@ export default function App() {
 
   const signIn = () =>
     runAction(async () => {
+      let signedIn: UserDto;
       try {
-        setUser(await api.getUserByEmail(emailInput));
+        signedIn = await api.getUserByEmail(emailInput);
       } catch {
-        setUser(await api.createUser(emailInput, nameInput || emailInput));
+        signedIn = await api.createUser(emailInput, nameInput || emailInput);
       }
+      // SEC-03: a separate explicit step from the lookup above, since
+      // `getUserByEmail` is also used (unrelated to sign-in) to resolve a
+      // teammate's id when inviting them to a project — see
+      // `commands::project`'s module doc.
+      await api.setCurrentUser(signedIn.id);
+      setUser(signedIn);
+    });
+
+  const signOut = () =>
+    runAction(async () => {
+      await api.signOut();
+      setUser(null);
     });
 
   // -- projects --
@@ -96,7 +109,7 @@ export default function App() {
             <h2>
               Signed in as {user.display_name} <span className="muted">({user.email})</span>
             </h2>
-            <button onClick={() => setUser(null)}>Sign out</button>
+            <button onClick={signOut}>Sign out</button>
           </section>
 
           <ProjectsPanel

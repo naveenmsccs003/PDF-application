@@ -35,6 +35,7 @@ pub fn create_markup(
         hidden: false,
     };
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
         .entry(page_id)
@@ -48,6 +49,7 @@ pub fn create_markup(
 #[tracing::instrument(skip(state), err)]
 pub fn get_markup(state: tauri::State<AppState>, id: String) -> Result<MarkupDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     markup::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
@@ -55,6 +57,7 @@ pub fn get_markup(state: tauri::State<AppState>, id: String) -> Result<MarkupDto
 #[tracing::instrument(skip(state), err)]
 pub fn list_markups_by_page(state: tauri::State<AppState>, page_id: String) -> Result<Vec<MarkupDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     markup::list_by_page(&conn, &page_id)
         .map(|markups| markups.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -70,6 +73,7 @@ pub fn update_markup_geometry(
 ) -> Result<(), String> {
     geometry.validate(markup_type).map_err(|e| e.to_string())?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
@@ -86,6 +90,7 @@ pub fn update_markup_geometry(
 #[tracing::instrument(skip(state), err)]
 pub fn update_markup_style(state: tauri::State<AppState>, id: String, style: MarkupStyle) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
@@ -99,6 +104,7 @@ pub fn update_markup_style(state: tauri::State<AppState>, id: String, style: Mar
 #[tracing::instrument(skip(state), err)]
 pub fn set_markup_locked(state: tauri::State<AppState>, id: String, locked: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
@@ -112,6 +118,7 @@ pub fn set_markup_locked(state: tauri::State<AppState>, id: String, locked: bool
 #[tracing::instrument(skip(state), err)]
 pub fn set_markup_hidden(state: tauri::State<AppState>, id: String, hidden: bool) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     let before = markup::get(&conn, &id).map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
@@ -125,6 +132,7 @@ pub fn set_markup_hidden(state: tauri::State<AppState>, id: String, hidden: bool
 #[tracing::instrument(skip(state), err)]
 pub fn delete_markup(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &id)?;
     let markup_row = markup::get(&conn, &id).map_err(|e| e.to_string())?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks
@@ -138,6 +146,7 @@ pub fn delete_markup(state: tauri::State<AppState>, id: String) -> Result<(), St
 #[tracing::instrument(skip(state), err)]
 pub fn undo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks.entry(page_id).or_default().undo(&conn).map_err(|e| e.to_string())
 }
@@ -146,6 +155,7 @@ pub fn undo_markup(state: tauri::State<AppState>, page_id: String) -> Result<boo
 #[tracing::instrument(skip(state), err)]
 pub fn redo_markup(state: tauri::State<AppState>, page_id: String) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     let mut stacks = state.markup_undo.lock().map_err(|e| e.to_string())?;
     stacks.entry(page_id).or_default().redo(&conn).map_err(|e| e.to_string())
 }
@@ -169,6 +179,7 @@ pub fn add_markup_comment(
     text: String,
 ) -> Result<MarkupCommentDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &markup_id)?;
     markup::add_comment(&conn, &markup_id, author.as_deref(), &text)
         .map(Into::into)
         .map_err(|e| e.to_string())
@@ -178,6 +189,7 @@ pub fn add_markup_comment(
 #[tracing::instrument(skip(state), err)]
 pub fn list_markup_comments(state: tauri::State<AppState>, markup_id: String) -> Result<Vec<MarkupCommentDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_access(&conn, &state, &markup_id)?;
     markup::list_comments(&conn, &markup_id)
         .map(|comments| comments.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -187,5 +199,6 @@ pub fn list_markup_comments(state: tauri::State<AppState>, markup_id: String) ->
 #[tracing::instrument(skip(state), err)]
 pub fn delete_markup_comment(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_markup_comment_access(&conn, &state, &id)?;
     markup::delete_comment(&conn, &id).map_err(|e| e.to_string())
 }

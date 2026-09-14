@@ -1,3 +1,4 @@
+mod authz;
 mod commands;
 mod dto;
 
@@ -34,6 +35,11 @@ pub struct AppState {
     /// startup from Tauri's own app data dir, same place the SQLite file
     /// lives.
     data_dir: PathBuf,
+    /// SEC-03: the user id currently signed in to this process, set by
+    /// `commands::project::{create_user,get_user_by_email}` on success and
+    /// read by `authz`'s membership checks. See `authz`'s module doc for
+    /// why one slot (not a session map) is the right model here.
+    current_user: Mutex<Option<String>>,
 }
 
 /// Structured logging (Section 18): every `#[tauri::command]` is annotated
@@ -118,6 +124,7 @@ pub fn run() {
                 pdf_engine,
                 markup_undo: Mutex::new(HashMap::new()),
                 data_dir,
+                current_user: Mutex::new(None),
             });
             Ok(())
         })
@@ -132,6 +139,8 @@ pub fn run() {
             commands::export::print_document,
             commands::project::create_user,
             commands::project::get_user_by_email,
+            commands::project::set_current_user,
+            commands::project::sign_out,
             commands::project::create_project,
             commands::project::list_projects_for_user,
             commands::project::add_project_member,

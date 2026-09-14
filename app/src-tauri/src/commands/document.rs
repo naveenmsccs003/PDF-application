@@ -11,6 +11,7 @@ use crate::AppState;
 #[tracing::instrument(skip(state), err)]
 pub fn get_document(state: tauri::State<AppState>, document_id: String) -> Result<DocumentDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::get_document(&conn, &document_id)
         .map(Into::into)
         .map_err(|e| e.to_string())
@@ -20,6 +21,7 @@ pub fn get_document(state: tauri::State<AppState>, document_id: String) -> Resul
 #[tracing::instrument(skip(state), err)]
 pub fn list_documents_for_project(state: tauri::State<AppState>, project_id: String) -> Result<Vec<DocumentDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_project_membership(&conn, &state, &project_id)?;
     document::list_documents_for_project(&conn, &project_id)
         .map(|docs| docs.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -29,6 +31,7 @@ pub fn list_documents_for_project(state: tauri::State<AppState>, project_id: Str
 #[tracing::instrument(skip(state), err)]
 pub fn list_pages(state: tauri::State<AppState>, document_id: String) -> Result<Vec<PageDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::list_pages(&conn, &document_id)
         .map(|pages| pages.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -38,6 +41,7 @@ pub fn list_pages(state: tauri::State<AppState>, document_id: String) -> Result<
 #[tracing::instrument(skip(state), err)]
 pub fn set_page_rotation(state: tauri::State<AppState>, page_id: String, rotation: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_page_access(&conn, &state, &page_id)?;
     document::set_page_rotation(&conn, &page_id, rotation).map_err(|e| e.to_string())
 }
 
@@ -45,6 +49,7 @@ pub fn set_page_rotation(state: tauri::State<AppState>, page_id: String, rotatio
 #[tracing::instrument(skip(state), err)]
 pub fn reorder_pages(state: tauri::State<AppState>, document_id: String, new_order: Vec<String>) -> Result<(), String> {
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::reorder_pages(&mut conn, &document_id, &new_order).map_err(|e| e.to_string())
 }
 
@@ -57,6 +62,7 @@ pub fn create_document_version(
     created_by: Option<String>,
 ) -> Result<DocumentVersionDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::create_version(&conn, &document_id, &file_snapshot_path, created_by.as_deref())
         .map(Into::into)
         .map_err(|e| e.to_string())
@@ -66,6 +72,7 @@ pub fn create_document_version(
 #[tracing::instrument(skip(state), err)]
 pub fn list_document_versions(state: tauri::State<AppState>, document_id: String) -> Result<Vec<DocumentVersionDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     document::list_versions(&conn, &document_id)
         .map(|versions| versions.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -96,6 +103,10 @@ pub fn save_document_revision(
     let snapshot_path = versions_dir.join(format!("{document_id}-{timestamp}.pdf"));
     let snapshot_path_str = snapshot_path.to_str().ok_or("snapshot path is not valid UTF-8")?;
 
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::authz::require_document_access(&conn, &state, &document_id)?;
+    }
     crate::commands::pdf::export_document_flattened_pdf(&state, &document_id, snapshot_path_str)?;
 
     let conn = state.db.lock().map_err(|e| e.to_string())?;

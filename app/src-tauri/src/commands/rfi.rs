@@ -17,6 +17,7 @@ pub fn create_rfi(
     created_by: Option<String>,
 ) -> Result<RfiDto, String> {
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     rfi::create(
         &mut conn,
         &document_id,
@@ -34,6 +35,7 @@ pub fn create_rfi(
 #[tracing::instrument(skip(state), err)]
 pub fn get_rfi(state: tauri::State<AppState>, id: String) -> Result<RfiDto, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_rfi_access(&conn, &state, &id)?;
     rfi::get(&conn, &id).map(Into::into).map_err(|e| e.to_string())
 }
 
@@ -41,6 +43,7 @@ pub fn get_rfi(state: tauri::State<AppState>, id: String) -> Result<RfiDto, Stri
 #[tracing::instrument(skip(state), err)]
 pub fn list_rfis_for_document(state: tauri::State<AppState>, document_id: String) -> Result<Vec<RfiDto>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_document_access(&conn, &state, &document_id)?;
     rfi::list_by_document(&conn, &document_id)
         .map(|rfis| rfis.into_iter().map(Into::into).collect())
         .map_err(|e| e.to_string())
@@ -55,5 +58,6 @@ pub fn set_rfi_status(
     response: Option<String>,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    crate::authz::require_rfi_access(&conn, &state, &id)?;
     rfi::set_status(&conn, &id, status, response.as_deref()).map_err(|e| e.to_string())
 }
