@@ -83,6 +83,120 @@ h4 {
   font-size: 0.95rem;
 }
 
+.app-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.tour-trigger {
+  flex-shrink: 0;
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+}
+
+.tour-trigger:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 1000;
+}
+
+.tour-card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 1.6rem 1.75rem 1.5rem;
+  max-width: 30rem;
+  width: 100%;
+}
+
+.tour-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.tour-step-count {
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tour-skip {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  padding: 0.2em 0.4em;
+}
+
+.tour-skip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: transparent;
+}
+
+.tour-card h2 {
+  margin-bottom: 0.6rem;
+}
+
+.tour-card p {
+  color: var(--text);
+  line-height: 1.55;
+  margin: 0 0 1.25rem;
+}
+
+.tour-dots {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1.25rem;
+}
+
+.tour-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.tour-dot.active {
+  background: var(--accent);
+}
+
+.tour-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.tour-next {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tour-next:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);

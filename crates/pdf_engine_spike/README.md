@@ -7,17 +7,51 @@ without the webkit2gtk system packages the Tauri build needs.
 
 ## Setup
 
-`lib/libpdfium.so` is not committed (7.8MB third-party binary, gitignored).
-Fetch it before running:
+`lib/` is not committed (the binary is 7-8MB third-party, gitignored). Every
+other `libpdfium` path in this workspace (this crate, `pdf_core`'s
+real-engine tests, and `app/src-tauri`'s dev-mode PDF loading) reads from
+this same `crates/pdf_engine_spike/lib/` directory, so fetching it once here
+is enough for all of them.
 
+The filename must match what `pdfium-render` looks for on your OS
+(`Pdfium::pdfium_platform_library_name()`, used everywhere in this
+workspace that resolves this path — not hardcoded per-platform):
+`libpdfium.so` on Linux, `libpdfium.dylib` on macOS, `pdfium.dll` on
+Windows.
+
+Linux:
 ```sh
 cd crates/pdf_engine_spike
 mkdir -p lib
-curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-linux-x64.tgz" \
-  | tar xz -C /tmp/pdfium-extract --strip-components=0 2>/dev/null || \
-  (mkdir -p /tmp/pdfium-extract && curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-linux-x64.tgz" -o /tmp/pdfium.tgz && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract)
+curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-linux-x64.tgz" -o /tmp/pdfium.tgz
+mkdir -p /tmp/pdfium-extract && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract
 cp /tmp/pdfium-extract/lib/libpdfium.so lib/libpdfium.so
 ```
+
+macOS (use `pdfium-mac-x64.tgz` on Intel):
+```sh
+cd crates/pdf_engine_spike
+mkdir -p lib
+curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-mac-arm64.tgz" -o /tmp/pdfium.tgz
+mkdir -p /tmp/pdfium-extract && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract
+cp /tmp/pdfium-extract/lib/libpdfium.dylib lib/libpdfium.dylib
+```
+
+Windows (PowerShell):
+```powershell
+cd crates\pdf_engine_spike
+mkdir lib
+Invoke-WebRequest "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-win-x64.tgz" -OutFile pdfium.tgz
+tar xzf pdfium.tgz -C pdfium-extract
+Copy-Item pdfium-extract\bin\pdfium.dll lib\pdfium.dll
+```
+
+**Only the Linux path has actually been run in this project.** The macOS
+and Windows steps follow the same released asset layout
+(bblanchon/pdfium-binaries) and the code path resolution is now
+platform-aware (see `pdf_core::platform_library_filename()`), but neither
+has been exercised on a real macOS/Windows machine — see the top-level
+`README.md`'s "Known limitations" for the full picture.
 
 ## Run
 

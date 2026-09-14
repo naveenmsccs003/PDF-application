@@ -302,6 +302,20 @@ impl TileCache {
     }
 }
 
+/// The pdfium shared library's filename on the platform this is compiled
+/// for (`libpdfium.so` on Linux, `libpdfium.dylib` on macOS, `pdfium.dll`
+/// on Windows) — a thin re-export of `pdfium-render`'s own
+/// `Pdfium::pdfium_platform_library_name()` so callers that depend on
+/// `pdf_core` (like `app/src-tauri`) don't need a direct `pdfium-render`
+/// dependency just to build a correct, cross-platform path to the fetched
+/// binary (see `crates/pdf_engine_spike/README.md`). Every dev-only
+/// `libpdfium` path in this workspace was hardcoded to the `.so` filename
+/// until this existed, which meant only Linux could actually find the
+/// library it fetched.
+pub fn platform_library_filename() -> std::ffi::OsString {
+    pdfium_render::prelude::Pdfium::pdfium_platform_library_name()
+}
+
 pub struct PdfiumEngine {
     pdfium: pdfium_render::prelude::Pdfium,
 }
@@ -459,13 +473,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn spike_lib_path() -> PathBuf {
-        // Reuses the same downloaded libpdfium.so as crates/pdf_engine_spike
+        // Reuses the same downloaded pdfium binary as crates/pdf_engine_spike
         // (see that crate's README for how to fetch it) rather than
-        // duplicating the binary.
+        // duplicating it. Filename is platform-dependent (`libpdfium.so` /
+        // `.dylib` / `pdfium.dll`) — see `platform_library_filename()`.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("pdf_engine_spike/lib/libpdfium.so")
+            .join("pdf_engine_spike/lib")
+            .join(platform_library_filename())
     }
 
     fn sample_pdf_path() -> Option<PathBuf> {

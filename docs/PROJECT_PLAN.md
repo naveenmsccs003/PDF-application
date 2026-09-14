@@ -769,6 +769,126 @@ Phase 0 starts until the table above is clear.
       in particular, whether the chosen highlight color/fade actually
       reads well against a real construction drawing rather than the flat
       synthetic test colors used here.
+  - **VIEW-04 synthetic large/vector-heavy render+tile validation
+    (2026-09-14)**: with SEC-03 and RFI-04 both closed, VIEW-04 was the
+    last non-BACKLOG row left `NOT_STARTED` (the Section 6 spike had
+    explicitly SKIPPED its "#3 render large/vector-heavy page" check for
+    lack of a real sample). Rather than leave it open indefinitely waiting
+    on Naveen to supply a real 100+ page construction drawing, built a
+    synthetic stand-in and measured against it — a new test,
+    `crates/pdf_core/tests/large_pdf_performance.rs`, generates a 30-page
+    ARCH-D-sized PDF (raw PDF bytes written directly at test time, no
+    committed fixture and no new PDF-authoring dependency — this workspace
+    only had read/render PDF deps before this) with ~1200 independently-
+    stroked line segments and ~80 text labels per page, meant to
+    approximate a rebar sheet's line/label density without claiming to be
+    one, then times real `PdfiumEngine` full-page renders and
+    `TileCache`-mediated tile renders against it.
+    - **Caught and corrected a real false alarm during this same pass**:
+      the first run (`cargo test -p pdf_core`, this workspace's normal
+      debug-build invocation) measured ~13s/tile and briefly looked like
+      confirmation that the crate's already-documented "re-rasterizes the
+      whole page per tile" limitation was a severe, shipping-blocking
+      problem. Re-running the identical test under `--release` (isolating
+      build profile as the only variable) gave ~250ms/tile — a ~30-50x
+      gap almost certainly from the `image` crate's PNG encode/decode path
+      (which every tile render exercises) being far slower unoptimized.
+      The debug numbers were real, just not representative of what a
+      compiled Tauri release binary will do; the test file's own doc
+      comment and `docs/00_SCOPE_REALITY_CHECK.md` now both record this
+      explicitly so a future debug-mode run of the same test doesn't
+      re-trigger the same false alarm. Also found: a real, reproducible
+      ~4.3s one-time first-render warm-up cost per process (every render
+      after the first was 80-85ms, including of different pages) — a
+      genuine finding worth the real app accounting for (e.g. a throwaway
+      warm-up render at startup), not something this pass attempted to fix.
+    - Test bounds are deliberately loose (debug-build tolerant, not tight
+      performance targets) — the point was catching a catastrophic
+      regression, not chasing a millisecond number; tile sample size was
+      also cut from an initial 16 down to 4 (still enough for a real
+      avg/tile number and to exercise `TileCache`'s hit path meaningfully)
+      once the debug-mode cost of 16 real tile renders (3+ minutes) made
+      clear that was needlessly slow for a suite this workspace runs
+      routinely.
+    - Explicitly NOT attempted: fixing `render_tile_to_png`'s "full page
+      re-render per tile" behavior (e.g. via `pdfium-render`'s
+      transformation-matrix + fixed-target-size API instead of
+      `clip()` — confirmed by reading the vendored crate source that
+      `clip()` still allocates a full-page-sized bitmap as the doc comment
+      already claimed, but a small fixed-size bitmap combined with a
+      custom transform matrix looks like it would actually rasterize only
+      the tile region; not attempted because getting the matrix math wrong
+      risks silently-corrupted tiles that pixel-count assertions wouldn't
+      catch, and this environment has no way to visually verify rendered
+      output). Recorded here as the concrete next step if/when tile-level
+      performance actually becomes a bottleneck against real content.
+    - Verified: `cargo test -p pdf_core --test large_pdf_performance` —
+      1/1 passing (both debug and `--release`, numbers above are from
+      real runs of each, not estimated). Full workspace
+      (`cargo test --workspace --exclude app`) — 116 test blocks passing,
+      no regressions. **NOT verified**: real construction-drawing content
+      (this is a synthetic proxy, not the Section 6 sample Naveen still
+      needs to supply), and whether 250ms/tile is actually acceptable once
+      real tile-based zoom/pan interaction is wired into the UI (VIEW-01/02
+      currently re-request a whole-page render at a new zoom width, not
+      individual tiles, so this pipeline's tile path has no real caller
+      yet either).
+  - **Top-level README, first-time product tour, cross-platform pdfium path
+    fix (2026-09-14)**: requested directly by Naveen — complete run-on-
+    another-machine setup docs, plus an in-app first-time tour.
+    - `README.md` (repo root, previously only `app/README.md`'s default
+      Tauri scaffold text existed): prerequisites per OS, the
+      `libpdfium` fetch step (now genuinely cross-platform, see below),
+      `npm run tauri dev`/test/build commands, a troubleshooting section
+      built from real problems hit earlier this project (the VS Code snap
+      sandbox `libpthread` crash, the keyring/Secret-Service requirement,
+      the pdfium-not-found error), and an honest "Known limitations"
+      section (Linux-only verified, ADR-001 still provisional, VIEW-04
+      synthetic-only, COLLAB-03 gated, real click-through mostly
+      unverified) rather than presenting this as more finished than the
+      rest of this doc already shows it to be.
+    - **Found a real, previously-unnoticed Linux-only bug while writing the
+      "other systems" instructions**: every `libpdfium` path in this
+      workspace (`app/src-tauri`'s `dev_pdfium_lib_path`, `pdf_core`'s test
+      helper, `pdf_engine_spike`'s own `main.rs`) hardcoded the `.so`
+      filename, so even a correctly-fetched macOS `.dylib` or Windows
+      `.dll` would never have been found — this had been invisible because
+      the project has only ever run on Linux. Fixed with a new
+      `pdf_core::platform_library_filename()` (thin wrapper over
+      `pdfium-render`'s own `Pdfium::pdfium_platform_library_name()`, which
+      already does exactly this — not reinvented), used by all three call
+      sites; `app/src-tauri` didn't previously depend on `pdfium-render`
+      directly and still doesn't, only on `pdf_core`. Genuinely unverified
+      beyond Linux still (no macOS/Windows machine in this environment),
+      but the path-resolution bug that would have silently blocked it is
+      now fixed rather than latent.
+    - First-time tour: new `app/src/Tour.tsx`, a description-only modal
+      walkthrough (8 steps: welcome, sign-in/projects, import/view,
+      markup/measure, takeoff, RFI/revisions, autosave/export, done) —
+      deliberately not DOM-anchored spotlighting, since most of what it
+      describes (projects, documents, the canvas, takeoff, RFIs) only
+      exists conditionally after sign-in/project/document selection, so
+      real element-anchoring would need faking that state for early steps.
+      Opens automatically on first launch (`localStorage` flag,
+      `mds-rebar:tour-seen-v1`) and is always replayable via a "Take the
+      tour" button added to the header. Also fixed a stale line in the
+      header's own subtitle text ("Zoom/pan isn't built yet") left over
+      from before VIEW-01/02 landed.
+    - Verified: full workspace `cargo test --workspace --exclude app` —
+      still 0 failures after the `platform_library_filename()` change,
+      including `pdf_core`'s 14 real-engine tests (confirms the new
+      platform-aware path resolution still finds the same Linux binary
+      correctly, not just that it compiles). `cargo check -p app` and
+      `cargo build -p pdf_engine_spike` — clean. `npm run build` — clean,
+      22 modules (up from 21, for `Tour.tsx`). Headless-Chrome screenshot
+      of `npm run dev` confirmed the tour renders and opens automatically
+      on first load, matching the app's existing visual style. **NOT
+      verified**: the tour's Next/Back/Skip interaction and the
+      seen-once-then-hidden behavior (only the initial render was
+      screenshotted, not click-through) — same outstanding live-IPC/
+      interaction-testing gap as every other frontend feature in this
+      project; also, the README's macOS/Windows steps themselves remain
+      unverified on real hardware, only the code path they depend on.
   - DONE (with evidence): SQLite + migrations, as a separate pure-Rust
     workspace crate `crates/mds_db` that does not depend on Tauri/webkit —
     this respects the prompt's own layering rule (Core Engine/Domain must

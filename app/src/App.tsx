@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
+import { ProductTour, hasTourBeenSeen } from "./Tour";
 import type {
   DocumentDto,
   DocumentVersionDto,
@@ -40,6 +41,12 @@ export default function App() {
       setError(String(e));
     }
   };
+
+  // -- first-time user tour --
+  const [tourOpen, setTourOpen] = useState(false);
+  useEffect(() => {
+    if (!hasTourBeenSeen()) setTourOpen(true);
+  }, []);
 
   // -- identity --
   const [user, setUser] = useState<UserDto | null>(null);
@@ -82,15 +89,23 @@ export default function App() {
 
   return (
     <main className="app">
-      <h1>MDS Rebar — Backend Control Panel</h1>
-      <p className="subtitle">
-        Working UI over the real IPC layer (not mockups) — every action here calls into
-        the Rust domain crates via Tauri commands. The page view renders the actual PDF
-        and supports click-to-draw markup (rectangle/line/arrow/cloud/text), select/move/
-        resize on existing shapes, and scale calibration/length/area/count measurement,
-        all drawn directly on the canvas; projects and takeoff are still a functional
-        control panel rather than a polished editor. Zoom/pan isn't built yet.
-      </p>
+      <div className="app-header-row">
+        <div>
+          <h1>MDS Rebar — Backend Control Panel</h1>
+          <p className="subtitle">
+            Working UI over the real IPC layer (not mockups) — every action here calls into
+            the Rust domain crates via Tauri commands. The page view renders the actual PDF
+            and supports click-to-draw markup (rectangle/line/arrow/cloud/text), select/move/
+            resize on existing shapes, scale calibration/length/area/count measurement, and
+            zoom/pan, all drawn directly on the canvas; projects and takeoff are still a
+            functional control panel rather than a polished editor.
+          </p>
+        </div>
+        <button className="tour-trigger" onClick={() => setTourOpen(true)}>
+          Take the tour
+        </button>
+      </div>
+      <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
 
       {!user ? (

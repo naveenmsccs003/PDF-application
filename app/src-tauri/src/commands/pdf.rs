@@ -30,13 +30,17 @@ use std::thread;
 
 pub fn dev_pdfium_lib_path() -> PathBuf {
     // app/src-tauri -> app -> pdf_application, then into the spike crate's
-    // fetched binary (see crates/pdf_engine_spike/README.md).
+    // fetched binary (see crates/pdf_engine_spike/README.md). Filename is
+    // platform-dependent (libpdfium.so / .dylib / pdfium.dll) — was
+    // hardcoded to `.so` until `pdf_core::platform_library_filename()`
+    // existed, which meant this only ever worked on Linux.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("app/src-tauri has a parent")
         .parent()
         .expect("app has a parent")
-        .join("crates/pdf_engine_spike/lib/libpdfium.so")
+        .join("crates/pdf_engine_spike/lib")
+        .join(pdf_core::platform_library_filename())
 }
 
 pub enum PdfEngineRequest {
